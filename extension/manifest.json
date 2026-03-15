@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SuperFLOW",
-  "description": "Understand complex SQL through flow in the current tab. Best experienced in Superset SQL Lab, with read-first support for other web-based SQL editors.",
+  "description": "SQL flow and lineage visualizer for web-based SQL editors. Best experienced in Superset SQL Lab.",
   "version": "0.1.0",
   "minimum_chrome_version": "116",
   "icons": {
