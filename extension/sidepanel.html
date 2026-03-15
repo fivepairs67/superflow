@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SuperFLOW</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <header class="hero">
+        <p class="eyebrow">SuperFLOW</p>
+        <div class="hero-head">
+          <div>
+            <h1>Query Flow</h1>
+            <p class="subtitle">
+              복잡한 SQL의 실행 구조를 세로 흐름으로 읽는 메인 뷰입니다.
+            </p>
+          </div>
+          <span id="status-pill" class="pill pill-idle">확인 중</span>
+        </div>
+        <div class="hero-chips">
+          <span id="hero-execution-chip" class="hero-chip is-idle">idle</span>
+          <span id="hero-rows-chip" class="hero-chip">rows -</span>
+          <span id="hero-duration-chip" class="hero-chip">duration -</span>
+        </div>
+      </header>
+
+      <section class="card card-primary">
+        <div class="card-header">
+          <div>
+            <p class="section-kicker">Main View</p>
+            <h2>Logical Graph</h2>
+          </div>
+          <div class="pill-row">
+            <span id="analysis-mode" class="pill pill-idle">없음</span>
+            <span id="graph-summary" class="pill pill-idle">0 nodes</span>
+          </div>
+        </div>
+        <div id="analysis-stats" class="stats">
+          <span class="stat-empty">아직 분석된 구조가 없습니다.</span>
+        </div>
+        <div id="analysis-clauses" class="signals">
+          <span class="signal-empty">클로즈 정보 없음</span>
+        </div>
+        <div class="graph-controls">
+          <p class="graph-hint">노드를 클릭하면 상위 source와 하위 query flow를 강조합니다.</p>
+          <button id="graph-reset-button" class="ghost-button" type="button" hidden>
+            Focus Reset
+          </button>
+        </div>
+        <div id="graph-canvas" class="graph-canvas">
+          <div class="graph-empty">아직 생성된 그래프가 없습니다.</div>
+        </div>
+        <div id="graph-focus" class="graph-focus graph-focus-empty">
+          아직 선택된 노드가 없습니다. 노드를 클릭하면 lineage를 따라 상위와 하위를 구분해 보여줍니다.
+        </div>
+        <div class="flow-block">
+          <p class="section-kicker">Flow Sequence</p>
+          <div id="flow-sequence" class="flow-sequence">
+            <span class="signal-empty">아직 생성된 흐름이 없습니다.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <p class="section-kicker">Structure</p>
+            <h2>Query Elements</h2>
+          </div>
+          <span id="sql-source" class="pill pill-idle">없음</span>
+        </div>
+        <div class="sql-meta">
+          <span id="sql-length">0 chars</span>
+          <span id="sql-updated-at">갱신 없음</span>
+        </div>
+        <div class="analysis-columns">
+          <div>
+            <h3>CTEs</h3>
+            <div id="cte-list" class="stack-list">
+              <div class="stack-empty">CTE 없음</div>
+            </div>
+          </div>
+          <div>
+            <h3>Sources</h3>
+            <div id="source-list" class="stack-list">
+              <div class="stack-empty">Source 없음</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <details class="card disclosure">
+        <summary class="disclosure-summary">
+          <div>
+            <p class="section-kicker">Runtime</p>
+            <h2>Execution</h2>
+          </div>
+          <span id="execution-status" class="pill pill-idle">idle</span>
+        </summary>
+        <div class="disclosure-body">
+          <dl class="meta">
+            <div>
+              <dt>Query ID</dt>
+              <dd id="execution-query-id">-</dd>
+            </div>
+            <div>
+              <dt>Duration</dt>
+              <dd id="execution-duration">-</dd>
+            </div>
+            <div>
+              <dt>Rows</dt>
+              <dd id="execution-row-count">-</dd>
+            </div>
+            <div>
+              <dt>Last Event</dt>
+              <dd id="execution-last-event">-</dd>
+            </div>
+            <div>
+              <dt>Error</dt>
+              <dd id="execution-error">-</dd>
+            </div>
+          </dl>
+        </div>
+      </details>
+
+      <details class="card disclosure">
+        <summary class="disclosure-summary">
+          <div>
+            <p class="section-kicker">Source</p>
+            <h2>SQL Snapshot</h2>
+          </div>
+          <span class="disclosure-label">preview</span>
+        </summary>
+        <div class="disclosure-body">
+          <pre id="sql-preview" class="sql-preview">아직 수집된 SQL이 없습니다.</pre>
+        </div>
+      </details>
+
+      <details class="card disclosure">
+        <summary class="disclosure-summary">
+          <div>
+            <p class="section-kicker">Diagnostics</p>
+            <h2>Current Tab</h2>
+          </div>
+          <span class="disclosure-label">status</span>
+        </summary>
+        <div class="disclosure-body disclosure-stack">
+          <dl class="meta">
+            <div>
+              <dt>URL</dt>
+              <dd id="page-url">활성 탭 정보를 불러오는 중입니다.</dd>
+            </div>
+            <div>
+              <dt>제목</dt>
+              <dd id="page-title">-</dd>
+            </div>
+            <div>
+              <dt>Superset 감지</dt>
+              <dd id="superset-like">-</dd>
+            </div>
+            <div>
+              <dt>SQL Lab 감지</dt>
+              <dd id="sql-lab">-</dd>
+            </div>
+          </dl>
+          <div id="signals" class="signals">
+            <span class="signal-empty">아직 수집된 신호가 없습니다.</span>
+          </div>
+        </div>
+      </details>
+
+      <details class="card disclosure">
+        <summary class="disclosure-summary">
+          <div>
+            <p class="section-kicker">Trace</p>
+            <h2>Recent Events</h2>
+          </div>
+          <span class="disclosure-label">network</span>
+        </summary>
+        <div class="disclosure-body">
+          <div id="event-log" class="event-log">
+            <div class="event-empty">아직 수집된 실행 이벤트가 없습니다.</div>
+          </div>
+        </div>
+      </details>
+    </main>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

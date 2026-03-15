@@ -1,0 +1,841 @@
+{
+  "fixtures": [
+    {
+      "file": "fixtures/sql/cte_diff.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "cteCount": 2,
+        "flowSequenceEquals": [
+          "SELECT",
+          "ORDER BY",
+          "RESULT"
+        ],
+        "sourceNamesInclude": [
+          "analytics.vw_sector_daily_index"
+        ],
+        "graphNodeTypesInclude": [
+          "cte",
+          "source_table",
+          "statement",
+          "orderBy",
+          "result"
+        ],
+        "graphColumnCountAtLeast": 5
+      }
+    },
+    {
+      "file": "fixtures/sql/ddl_workflow.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast-script",
+        "statementCount": 3,
+        "scriptDependencyCount": 2
+      },
+      "statements": [
+        {
+          "index": 0,
+          "mode": "ast",
+          "writesInclude": [
+            "news_today"
+          ],
+          "graphNodeTypesInclude": [
+            "write_target"
+          ]
+        },
+        {
+          "index": 1,
+          "mode": "ast",
+          "writesInclude": [
+            "news_enriched"
+          ],
+          "graphNodeTypesInclude": [
+            "write_target"
+          ]
+        },
+        {
+          "index": 2,
+          "mode": "ast",
+          "sourceNamesInclude": [
+            "news_enriched"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/eda_news_worksheet.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast-script",
+        "statementCount": 5,
+        "scriptDependencyCount": 0
+      }
+    },
+    {
+      "file": "fixtures/sql/join_sentiment.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "sourceNamesInclude": [
+          "analytics.news_mk",
+          "analytics.news_mk_analysis"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "filter",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/metadata_lookup.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast-script",
+        "statementCount": 2
+      }
+    },
+    {
+      "file": "fixtures/sql/hive_external_table.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast-script",
+        "statementCount": 3
+      },
+      "statements": [
+        {
+          "index": 1,
+          "mode": "ast",
+          "parserDialect": "hive",
+          "writesInclude": [
+            "log4jLogs"
+          ],
+          "graphNodeTypesInclude": [
+            "write_target"
+          ]
+        },
+        {
+          "index": 2,
+          "mode": "ast",
+          "sourceNamesInclude": [
+            "log4jLogs"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/postgres_subqueries.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "cteCount": 2,
+        "sourceCountAtLeast": 4,
+        "flowSequenceEquals": [
+          "SELECT",
+          "JOIN",
+          "FILTER",
+          "ORDER BY",
+          "RESULT"
+        ],
+        "sourceNamesInclude": [
+          "orders",
+          "order_items",
+          "customers",
+          "products"
+        ],
+        "graphNodeTypesInclude": [
+          "cte",
+          "source_table",
+          "inline_view",
+          "scalar_subquery",
+          "exists_subquery",
+          "in_subquery",
+          "statement",
+          "filter",
+          "join",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/trino_metrics.sql",
+      "options": {
+        "dialectPreference": "trino"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "cteCount": 1,
+        "parserDialect": "trino",
+        "parserEngine": "dt",
+        "graphColumnCountAtLeast": 4,
+        "sourceNamesInclude": [
+          "sales"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/trino_nested_subqueries.sql",
+      "options": {
+        "dialectPreference": "trino"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "cteCount": 1,
+        "parserDialect": "trino",
+        "parserEngine": "dt",
+        "sourceCountAtLeast": 2,
+        "graphNodeTypesInclude": [
+          "inline_view",
+          "scalar_subquery",
+          "exists_subquery",
+          "in_subquery",
+          "statement",
+          "filter",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/hive_lateral_view.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "hive",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "pageAds"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "filter",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/hive_insert_overwrite.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "hive",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "analytics.raw_sales"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "filter",
+          "aggregate",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/trino_ctas.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "parserEngine": "dt",
+        "flowSequenceEquals": [
+          "SELECT",
+          "GROUP BY",
+          "RESULT",
+          "WRITE"
+        ],
+        "sourceNamesInclude": [
+          "sales_events",
+          "base"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "aggregate",
+          "result",
+          "write_target"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_update_from.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "generic",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "account_tiers"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "inline_view",
+          "join",
+          "set",
+          "statement",
+          "filter",
+          "result",
+          "write_target"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_delete_using.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "generic",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "orders",
+          "refunds"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "join",
+          "statement",
+          "filter",
+          "result",
+          "write_target"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_having_rollup.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "generic",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "orders"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "aggregate",
+          "having",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/trino_merge_into.sql",
+      "options": {
+        "dialectPreference": "trino"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "parserDialect": "trino",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "dim_customer",
+          "staging_customer"
+        ],
+        "graphNodeLabelsInclude": [
+          "MATCH ON",
+          "WHEN MATCHED UPDATE",
+          "WHEN NOT MATCHED INSERT"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "join",
+          "merge_match",
+          "merge_action",
+          "result",
+          "write_target"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_union_exists.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "generic",
+        "statementCount": 1,
+        "cteCount": 2,
+        "sourceNamesInclude": [
+          "orders",
+          "refunds",
+          "customers"
+        ],
+        "graphNodeTypesInclude": [
+          "cte",
+          "source_table",
+          "union_branch",
+          "exists_subquery",
+          "statement",
+          "union",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_distinct_join.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "generic",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "customers",
+          "orders"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "distinct",
+          "join",
+          "filter",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/oracle_like_detection.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "oracle-like",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "orders"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "filter",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/trino_unnest_orders.sql",
+      "options": {
+        "dialectPreference": "trino"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "parserDialect": "trino",
+        "parserEngine": "dt",
+        "graphColumnCountAtLeast": 2,
+        "sourceNamesInclude": [
+          "orders",
+          "UNNEST"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "unnest_source",
+          "statement",
+          "join",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/trino_commerce_rollup.sql",
+      "options": {
+        "dialectPreference": "trino"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "cteCount": 16,
+        "parserDialect": "trino",
+        "parserEngine": "dt",
+        "flowSequenceEquals": [
+          "SELECT",
+          "FILTER",
+          "ORDER BY",
+          "RESULT"
+        ],
+        "graphColumnCountAtLeast": 150,
+        "sourceNamesInclude": [
+          "commerce.orders",
+          "commerce.order_items",
+          "commerce.products",
+          "commerce.categories",
+          "commerce.members",
+          "commerce.coupons",
+          "commerce.traffic_events"
+        ],
+        "graphNodeTypesInclude": [
+          "cte",
+          "source_table",
+          "statement",
+          "filter",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/generic_qualify_window.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "generic",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "monthly_sales"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "window",
+          "qualify",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/hive_lateral_view_explode.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "hive",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "events",
+          "LATERAL VIEW"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "lateral_view",
+          "statement",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_intersect_simple.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "generic",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "a",
+          "b"
+        ],
+        "graphNodeLabelsInclude": [
+          "INTERSECT"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "union_branch",
+          "statement",
+          "union",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_recursive_cte.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "cteCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "flowSequenceEquals": [
+          "SELECT",
+          "ORDER BY",
+          "RESULT"
+        ],
+        "recursiveCteNamesInclude": [
+          "nums"
+        ],
+        "graphNodeTypesInclude": [
+          "cte",
+          "statement",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_rollup_sales.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "orders"
+        ],
+        "graphNodeLabelsInclude": [
+          "ROLLUP"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "aggregate",
+          "having",
+          "orderBy",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_insert_values.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "graphNodeLabelsInclude": [
+          "VALUES (3)"
+        ],
+        "graphNodeTypesInclude": [
+          "statement",
+          "values",
+          "result",
+          "write_target"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_update_returning.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "graphNodeLabelsInclude": [
+          "SET",
+          "FILTER",
+          "RETURNING"
+        ],
+        "graphNodeTypesInclude": [
+          "statement",
+          "set",
+          "filter",
+          "returning",
+          "result",
+          "write_target"
+        ]
+      },
+      "statements": [
+        {
+          "index": 0,
+          "writesInclude": [
+            "analytics.daily_sales"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/postgres_insert_on_conflict.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "graphNodeLabelsInclude": [
+          "VALUES (1)",
+          "ON CONFLICT",
+          "DO UPDATE"
+        ],
+        "graphNodeTypesInclude": [
+          "statement",
+          "values",
+          "conflict",
+          "conflict_action",
+          "result",
+          "write_target"
+        ]
+      },
+      "statements": [
+        {
+          "index": 0,
+          "writesInclude": [
+            "analytics.daily_sales"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/postgres_select_offset.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "orders"
+        ],
+        "graphNodeLabelsInclude": [
+          "FILTER",
+          "ORDER BY",
+          "OFFSET"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "filter",
+          "orderBy",
+          "offset",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_tablesample_read.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "orders"
+        ],
+        "sourceSampleKindsInclude": [
+          "TABLESAMPLE BERNOULLI REPEATABLE"
+        ],
+        "graphNodeLabelsInclude": [
+          "FILTER",
+          "ORDER BY",
+          "OFFSET"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "filter",
+          "orderBy",
+          "offset",
+          "result"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/postgres_cte_star_expansion.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "cteCount": 1,
+        "parserDialect": "postgresql",
+        "parserEngine": "node",
+        "sourceNamesInclude": [
+          "orders"
+        ],
+        "graphColumnNamesInclude": [
+          "order_id",
+          "customer_id",
+          "amount"
+        ],
+        "graphColumnCountAtLeast": 3,
+        "graphNodeTypesInclude": [
+          "cte",
+          "source_table",
+          "statement",
+          "result"
+        ]
+      }
+    }
+  ]
+}

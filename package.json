@@ -1,0 +1,27 @@
+{
+  "name": "superset-query-visualizer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:dt-shim": "node ./tools/vendor/build-dt-shim.mjs",
+    "build:extension": "node ./tools/build/build.mjs",
+    "dev:extension": "node ./tools/build/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "spike:compare-parsers": "node ./tools/spikes/compare-parsers.mjs",
+    "test:parser-fixtures": "node ./tools/tests/parser-fixtures.mjs"
+  },
+  "dependencies": {
+    "dt-sql-parser": "^4.4.2",
+    "node-sql-parser": "^5.4.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.24",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "esbuild": "^0.25.1",
+    "typescript": "^5.8.2"
+  }
+}
