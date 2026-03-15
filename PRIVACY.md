@@ -66,8 +66,6 @@ When integrated with a website such as Superset SQL Lab, SuperFLOW may observe t
   Used to inject or coordinate extension logic with the active page when needed.
 - `clipboardRead`
   Used only when the user explicitly requests clipboard-based SQL analysis.
-- `clipboardWrite`
-  Used only when the user explicitly uses extension flows that write captured SQL to the clipboard.
 - `optional host permissions`
   Used only after the user enables a specific site. This allows SuperFLOW to read SQL context from that site's pages and render analysis there.
 

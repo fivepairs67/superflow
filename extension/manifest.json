@@ -10,7 +10,7 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["sidePanel", "storage", "tabs", "scripting", "clipboardRead", "clipboardWrite"],
+  "permissions": ["sidePanel", "storage", "tabs", "scripting", "clipboardRead"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js",
