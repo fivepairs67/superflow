@@ -102,7 +102,31 @@ npm run build:extension
 Build output:
 - `dist/extension/`
 
-Load this folder in Chrome Extensions developer mode.
+Notes:
+- `dist/extension/` is generated locally and is not committed to GitHub.
+- If you cloned the repository from GitHub, run the build command first.
+- Then load `dist/extension/` in Chrome Extensions developer mode.
+
+## Install from GitHub Release
+
+1. Download the latest `superflow-extension-vX.Y.Z.zip` asset from the repository's Releases page.
+2. Extract the archive.
+3. Open `chrome://extensions` in Chrome.
+4. Turn on `Developer mode`.
+5. Click `Load unpacked`.
+6. Select the extracted `superflow-extension-vX.Y.Z/` folder.
+
+## Create a Release Archive
+
+```bash
+npm install
+npm run build:release
+```
+
+Release output:
+- `dist/release/superflow-extension-vX.Y.Z.zip`
+
+Use this zip as a GitHub Release asset. The repository itself keeps source code only.
 
 ## Docs
 

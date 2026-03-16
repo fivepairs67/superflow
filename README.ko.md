@@ -102,7 +102,31 @@ npm run build:extension
 빌드 산출물:
 - `dist/extension/`
 
-Chrome 확장 프로그램 개발자 모드에서 이 폴더를 로드하면 됩니다.
+안내:
+- `dist/extension/`은 로컬에서 생성되는 산출물이고 GitHub에는 포함되지 않습니다.
+- GitHub에서 repo를 clone한 경우 먼저 빌드를 실행해야 합니다.
+- 그 다음 Chrome 확장 프로그램 개발자 모드에서 `dist/extension/` 폴더를 로드하면 됩니다.
+
+## GitHub Release로 설치하기
+
+1. 리포지토리의 Releases 페이지에서 최신 `superflow-extension-vX.Y.Z.zip` 파일을 다운로드합니다.
+2. 압축을 해제합니다.
+3. Chrome에서 `chrome://extensions`를 엽니다.
+4. `개발자 모드`를 켭니다.
+5. `압축해제된 확장 프로그램을 로드합니다`를 클릭합니다.
+6. 압축 해제된 `superflow-extension-vX.Y.Z/` 폴더를 선택합니다.
+
+## Release 아카이브 만들기
+
+```bash
+npm install
+npm run build:release
+```
+
+생성 결과:
+- `dist/release/superflow-extension-vX.Y.Z.zip`
+
+이 zip 파일을 GitHub Release asset으로 올리면 됩니다. 리포지토리에는 source code만 유지합니다.
 
 ## 문서
 

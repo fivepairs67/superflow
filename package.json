@@ -6,6 +6,7 @@
   "scripts": {
     "build:dt-shim": "node ./tools/vendor/build-dt-shim.mjs",
     "build:extension": "node ./tools/build/build.mjs",
+    "build:release": "npm run build:extension && node ./tools/build/package-release.mjs",
     "dev:extension": "node ./tools/build/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "spike:compare-parsers": "node ./tools/spikes/compare-parsers.mjs",
