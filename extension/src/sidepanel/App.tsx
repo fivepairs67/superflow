@@ -12,6 +12,10 @@ import { InputCaptureControls } from "./components/sql/InputCaptureControls";
 import { StatementOutline } from "./components/sql/StatementOutline";
 import { SqlSnapshot } from "./components/sql/SqlSnapshot";
 import { getNodeSpans, normalizeGraphSpans } from "./features/graph/spans";
+import {
+  buildStatementGroupStatement,
+  findStatementDisplayGroup,
+} from "./features/sql/statement-groups";
 import { useTabSession } from "./hooks/useTabSession";
 import { useGraphStore } from "./state/graph-store";
 
@@ -290,5 +294,16 @@ function getActiveStatement(
 
   const fallbackIndex = analysis?.activeStatementIndex ?? statements.length - 1;
   const index = typeof selectedStatementIndex === "number" ? selectedStatementIndex : fallbackIndex;
-  return statements.find((statement) => statement.index === index) || statements[fallbackIndex] || statements[0] || null;
+  const selectedGroup = findStatementDisplayGroup(statements, index);
+
+  if (selectedGroup && selectedGroup.kind !== "single" && selectedGroup.statements.length > 1) {
+    return buildStatementGroupStatement(selectedGroup, analysis?.normalizedSql);
+  }
+
+  return (
+    statements.find((statement) => statement.index === index) ||
+    statements[fallbackIndex] ||
+    statements[0] ||
+    null
+  );
 }

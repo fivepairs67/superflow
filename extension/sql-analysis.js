@@ -30,7 +30,9 @@ const DT_SQL_PARSERS = {
   hive: new HiveSQL(),
   trino: new TrinoSQL(),
 };
-const IDENTIFIER_PART_PATTERN = '(?:"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[a-zA-Z0-9_-]+)';
+const TEMPLATE_TOKEN_PATTERN = '(?:\\{\\{[\\s\\S]*?\\}\\}|\\{%[\\s\\S]*?%\\}|\\$\\{[\\s\\S]*?\\})';
+const IDENTIFIER_ATOM_PATTERN = `(?:${TEMPLATE_TOKEN_PATTERN}|[a-zA-Z0-9_-])+`;
+const IDENTIFIER_PART_PATTERN = `(?:"[^"]+"|\`[^\`]+\`|\\[[^\\]]+\\]|${IDENTIFIER_ATOM_PATTERN})`;
 const QUALIFIED_IDENTIFIER_PATTERN = `${IDENTIFIER_PART_PATTERN}(?:\\.${IDENTIFIER_PART_PATTERN})*`;
 const DIALECT_PREFERENCE_VALUES = new Set(["auto", "postgresql", "hive", "trino", "oracle"]);
 const HEURISTIC_ALIAS_STOP_WORDS = new Set([
@@ -398,25 +400,38 @@ function analyzeStatement(statementInput, index, dialectContext) {
   const rawSql =
     typeof statementInput === "string" ? statementInput : normalizeSql(statementInput?.sql || "");
   const sql = normalizeSql(rawSql);
+  const structuralSql = maskCommentsPreserveOffsets(sql);
+  const directiveInfo = detectStandaloneDirective(structuralSql);
+
+  if (directiveInfo) {
+    return buildDirectiveStatement(statementInput, index, sql, directiveInfo);
+  }
+
   const preprocessed = preprocessSql(sql);
   const analysisSql = preprocessed.sql || sql;
-  const structuralSql = maskCommentsPreserveOffsets(sql);
   const scopeInfo = extractCtes(structuralSql);
 
   if (!sql) {
     return emptyStatement(index, rawSql);
   }
 
-  const parseState = parseStatementAst(analysisSql, dialectContext);
-  const astInfo = parseState.astInfo;
+  const parseState = parseStatementAst(analysisSql, dialectContext, sql);
+  const astInfo = restoreTemplatePlaceholdersDeep(parseState.astInfo, preprocessed.templates);
   const rootStatementType = astInfo?.rootStatementType || detectRootStatementType(analysisSql);
-  const logicalSql = extractLogicalBodySql(structuralSql, rootStatementType);
-  const logicalScopeInfo = extractCtes(logicalSql);
+  const writes = astInfo?.writes?.length ? astInfo.writes : extractWrites(sql);
+  const cleanupWriteOnlyStatement = isCleanupWriteStatementType(rootStatementType, writes);
+  const logicalBody = extractLogicalBodySegment(structuralSql, rootStatementType);
+  const logicalSql = logicalBody.sql;
+  const logicalScopeInfo = offsetScopeInfo(extractCtes(logicalSql), logicalBody.start);
   const cteInfo = astInfo
     ? {
         ctes: mergeCteRanges(astInfo.ctes || [], scopeInfo.ctes?.length ? scopeInfo.ctes : logicalScopeInfo.ctes || []),
         mainStatement: logicalScopeInfo.mainStatement || logicalSql,
-        mainStatementStart: logicalScopeInfo.mainStatementStart ?? scopeInfo.mainStatementStart ?? 0,
+        mainStatementStart:
+          logicalScopeInfo.mainStatementStart ??
+          logicalBody.start ??
+          scopeInfo.mainStatementStart ??
+          0,
       }
     : logicalScopeInfo;
   const cteNames = cteInfo.ctes.map((cte) => cte.name);
@@ -429,9 +444,11 @@ function analyzeStatement(statementInput, index, dialectContext) {
     cteInfo.mainStatement || logicalSql,
     cteInfo.mainStatementStart ?? scopeInfo.mainStatementStart ?? 0,
   );
-  const statementSources = astInfo
-    ? mergeSourcesWithRanges(astInfo.statementSources || [], heuristicStatementSources)
-    : heuristicStatementSources;
+  const statementSources = cleanupWriteOnlyStatement
+    ? []
+    : astInfo
+      ? mergeSourcesWithRanges(astInfo.statementSources || [], heuristicStatementSources)
+      : heuristicStatementSources;
   const heuristicJoinTypes = extractJoinTypes(cteInfo.mainStatement || logicalSql);
   const statementJoins = astInfo
     ? Array.from(new Set([...(astInfo.statementJoins || []), ...heuristicJoinTypes]))
@@ -441,12 +458,12 @@ function analyzeStatement(statementInput, index, dialectContext) {
   const ctes = astInfo ? mergeCteAnalysis(cteInfo.ctes, heuristicCtes) : heuristicCtes;
   const hydratedCtes = hydrateColumnSpansForCtes(ctes);
   const heuristicReads = extractExternalReads(statementSources, hydratedCtes, cteNames);
-  const reads =
-    astInfo?.reads?.length
+  const reads = cleanupWriteOnlyStatement
+    ? []
+    : astInfo?.reads?.length
       ? mergeSourcesWithRanges(astInfo.reads || [], heuristicReads)
       : heuristicReads;
   const sources = reads;
-  const writes = astInfo?.writes?.length ? astInfo.writes : extractWrites(analysisSql);
   const statementColumns = applyColumnSpansToColumns(
     astInfo?.statementColumns || [],
     cteInfo.mainStatement || logicalSql,
@@ -471,6 +488,7 @@ function analyzeStatement(statementInput, index, dialectContext) {
     mainStatementSql: cteInfo.mainStatement || logicalSql,
     mainStatementStart: cteInfo.mainStatementStart ?? scopeInfo.mainStatementStart ?? 0,
     statementRangeEnd: sql.length,
+    statementSql: sql,
   });
 
   return {
@@ -512,7 +530,7 @@ function analyzeStatement(statementInput, index, dialectContext) {
       sourceCount: sources.length,
       joinCount: statementJoins.length,
       clauseCount: Object.values(clauses).filter(Boolean).length,
-      templateCount: 0,
+      templateCount: preprocessed.templates.length,
       statementType: rootStatementType,
     },
   };
@@ -626,14 +644,14 @@ function pickActiveStatementIndex(statements, dependencies) {
   return statements[statements.length - 1].index;
 }
 
-function parseStatementAst(sql, dialectContext) {
+function parseStatementAst(sql, dialectContext, rawSql = sql) {
   const parserCandidates = dialectContext?.parserCandidates?.length
     ? dialectContext.parserCandidates
     : ["postgresql", "hive"];
   const parserAttempts = [];
 
   for (const parserDialect of parserCandidates) {
-    const parserState = tryParserCandidate(sql, parserDialect);
+    const parserState = tryParserCandidate(sql, parserDialect, rawSql);
 
     if (parserState.ok) {
       return {
@@ -659,9 +677,9 @@ function parseStatementAst(sql, dialectContext) {
   };
 }
 
-function tryParserCandidate(sql, parserDialect) {
+function tryParserCandidate(sql, parserDialect, rawSql = sql) {
   if (parserDialect === "trino") {
-    return tryDtParserCandidate(sql, "trino");
+    return tryDtParserCandidate(sql, "trino", rawSql);
   }
 
   const nodeResult = tryNodeParserCandidate(sql, parserDialect);
@@ -670,7 +688,7 @@ function tryParserCandidate(sql, parserDialect) {
     return nodeResult;
   }
 
-  const dtResult = tryDtParserCandidate(sql, "hive");
+  const dtResult = tryDtParserCandidate(sql, "hive", rawSql);
 
   if (dtResult.ok) {
     return dtResult;
@@ -753,7 +771,7 @@ function tryNodeParserCandidate(sql, parserDialect) {
   }
 }
 
-function tryDtParserCandidate(sql, parserDialect) {
+function tryDtParserCandidate(sql, parserDialect, rawSql = sql) {
   const parser = DT_SQL_PARSERS[parserDialect];
 
   if (!parser) {
@@ -766,7 +784,7 @@ function tryDtParserCandidate(sql, parserDialect) {
   try {
     parser.parse(sql);
     const entities = parser.getAllEntities(sql) || [];
-    const astInfo = buildDtAstInfo(sql, parserDialect, entities);
+    const astInfo = buildDtAstInfo(rawSql, parserDialect, entities);
 
     return {
       ok: true,
@@ -785,16 +803,18 @@ function tryDtParserCandidate(sql, parserDialect) {
 function buildDtAstInfo(sql, parserDialect, entities) {
   const structuralSql = maskCommentsPreserveOffsets(sql);
   const rootStatementType = detectRootStatementType(sql);
-  const logicalSql = extractLogicalBodySql(structuralSql, rootStatementType);
+  const logicalBody = extractLogicalBodySegment(structuralSql, rootStatementType);
+  const logicalSql = logicalBody.sql;
   const scopeInfo = extractCtes(structuralSql);
-  const logicalScopeInfo = extractCtes(logicalSql);
+  const logicalScopeInfo = offsetScopeInfo(extractCtes(logicalSql), logicalBody.start);
   const mainStatementSql = logicalScopeInfo.mainStatement || logicalSql;
-  const mainStatementStart = logicalScopeInfo.mainStatementStart ?? 0;
-  const cteNames = (scopeInfo.ctes || []).map((cte) => cte.name);
+  const mainStatementStart = logicalScopeInfo.mainStatementStart ?? logicalBody.start ?? 0;
+  const scopedCtes = scopeInfo.ctes?.length ? scopeInfo.ctes : logicalScopeInfo.ctes || [];
+  const cteNames = scopedCtes.map((cte) => cte.name);
   const availableColumnsBySource = new Map();
   const astCtes = [];
 
-  for (const cte of scopeInfo.ctes || []) {
+  for (const cte of scopedCtes) {
     const sources = extractSources(cte.body || "", cte.bodyRangeStart ?? 0);
     const readSources = sources;
     const subqueries = extractHeuristicSubqueries(
@@ -840,7 +860,7 @@ function buildDtAstInfo(sql, parserDialect, entities) {
   const setOperatorKind = detectSetOperatorKind(mainStatementSql);
   const valuesRowCount = detectValuesRowCount(mainStatementSql);
   const conflictKind = detectConflictKind(mainStatementSql);
-  const writes = extractDtWrites(entities);
+  const writes = extractDtWrites(entities, sql);
   const reads = extractExternalReads(statementReadSources, astCtes, resolvedCteNames);
 
   return {
@@ -856,7 +876,7 @@ function buildDtAstInfo(sql, parserDialect, entities) {
     valuesRowCount,
     conflictKind,
     ctes: astCtes,
-    isRecursive: Boolean(scopeInfo.isRecursive),
+    isRecursive: Boolean(scopeInfo.ctes?.length ? scopeInfo.isRecursive : logicalScopeInfo.isRecursive),
     reads,
     writes,
     statementColumns: extractHeuristicOutputColumns(
@@ -885,6 +905,10 @@ function extractDtSources(entities) {
       continue;
     }
 
+    if (isDtInsertTargetEntity(entity)) {
+      continue;
+    }
+
     const name = normalizeSql(entity?.text || "");
 
     if (!name) {
@@ -907,9 +931,13 @@ function extractDtSources(entities) {
   return sources;
 }
 
-function extractDtWrites(entities) {
+function extractDtWrites(entities, sql = "") {
   const writes = [];
   const seen = new Set();
+  const normalizedSql = normalizeSql(sql);
+  const insertKind = /^\s*insert\s+overwrite\b/i.test(normalizedSql)
+    ? "insert_overwrite"
+    : "insert_into";
 
   for (const entity of entities || []) {
     const type = String(entity?.entityContextType || "");
@@ -925,6 +953,8 @@ function extractDtWrites(entities) {
       kind = "create_table";
     } else if (type === "viewCreate") {
       kind = "create_view";
+    } else if (type === "table" && isDtInsertTargetEntity(entity)) {
+      kind = insertKind;
     }
 
     if (!kind) {
@@ -945,6 +975,11 @@ function extractDtWrites(entities) {
   }
 
   return writes;
+}
+
+function isDtInsertTargetEntity(entity) {
+  return String(entity?.entityContextType || "") === "table" &&
+    String(entity?.belongStmt?.stmtContextType || "") === "insertStmt";
 }
 
 function sanitizeParseError(message) {
@@ -1283,9 +1318,10 @@ function extractAstSubqueries(ast, ownerNodeId, cteNames = []) {
     for (const group of extractAstSourceGroups(node)) {
       for (const entry of group.entries) {
         const wrapper = entry?.expr || entry?.stmt || entry?.query_expr;
+        const sourceRole = entry?.join ? "join" : group.defaultType;
 
         if (wrapper?.ast && typeof wrapper.ast === "object") {
-          registerSubquery(wrapper.ast, "inline_view", currentOwnerNodeId);
+          registerSubquery(wrapper.ast, "inline_view", currentOwnerNodeId, { sourceRole });
           continue;
         }
 
@@ -1414,6 +1450,7 @@ function extractAstSubqueries(ast, ownerNodeId, cteNames = []) {
       clauses,
       sourceCount: sources.length,
       setOperator: options.setOperator || null,
+      sourceRole: options.sourceRole || null,
     });
 
     walkAstNode(subAst, subqueryNodeId);
@@ -1542,17 +1579,37 @@ function extractHeuristicSubqueries(sql, ownerNodeId, baseOffset = 0) {
       }
 
       const kind = inferHeuristicSubqueryKind(maskedSql, index);
+      const sourceRole =
+        kind === "inline_view" ? inferHeuristicInlineViewSourceRole(maskedSql, index) : null;
       const subqueryNodeId = nextSubqueryId(currentOwnerNodeId);
       const sources = extractSources(innerSql, currentBaseOffset + index + 1);
       const joinTypes = extractJoinTypes(innerSql);
       const clauses = detectClauses(innerSql, joinTypes);
       const setOperatorKind = detectSetOperatorKind(innerSql);
+      const setBranches = splitTopLevelSetBranches(
+        innerSql,
+        currentBaseOffset + index + 1,
+      );
+      const hasExplicitSetBranches = setBranches.length > 1;
+      const inlineViewAlias =
+        kind === "inline_view" ? findInlineViewAlias(maskedSql, balanced.nextIndex) : "";
+      const subqueryRanges = resolveHeuristicSubqueryRanges(
+        maskedSql,
+        index,
+        balanced,
+        kind,
+        currentBaseOffset,
+      );
+      const primarySubqueryRange = subqueryRanges[0] || {
+        start: currentBaseOffset + index,
+        end: currentBaseOffset + balanced.nextIndex,
+      };
 
       subqueries.push({
         id: subqueryNodeId,
         parentNodeId: currentOwnerNodeId,
         type: kind,
-        label: buildSubqueryLabel(kind),
+        label: buildSubqueryLabel(kind, inlineViewAlias),
         statementType: detectStatementType(innerSql),
         sources,
         readSources: sources,
@@ -1560,9 +1617,79 @@ function extractHeuristicSubqueries(sql, ownerNodeId, baseOffset = 0) {
         clauses,
         sourceCount: sources.length,
         setOperator: setOperatorKind || null,
+        branchCount: hasExplicitSetBranches ? setBranches.length : 0,
+        hasExplicitSetBranches,
+        alias: inlineViewAlias || null,
+        sourceRole,
+        rangeStart: primarySubqueryRange.start,
+        rangeEnd: primarySubqueryRange.end,
+        ranges: subqueryRanges,
       });
 
-      walkSegment(innerSql, subqueryNodeId, currentBaseOffset + index + 1);
+      if (hasExplicitSetBranches) {
+        setBranches.forEach((branch, branchIndex) => {
+          const branchSources = extractSources(branch.sql, branch.rangeStart).map(
+            (source, sourceIndex) => {
+              const exactRanges = hasTemplateSyntax(source.name)
+                ? findExactIdentifierRanges(branch.sql, source.name).map((range) => ({
+                    start: branch.rangeStart + range.start,
+                    end: branch.rangeStart + range.end,
+                  }))
+                : [];
+              const resolvedRanges =
+                exactRanges.length
+                  ? exactRanges
+                  : source.ranges ||
+                    (typeof source.rangeStart === "number" &&
+                    typeof source.rangeEnd === "number"
+                      ? [{ start: source.rangeStart, end: source.rangeEnd }]
+                      : []);
+
+              return {
+                ...source,
+                rangeStart: resolvedRanges[0]?.start ?? source.rangeStart,
+                rangeEnd: resolvedRanges[0]?.end ?? source.rangeEnd,
+                ranges: resolvedRanges,
+                instanceKey: `${subqueryNodeId}:branch:${branchIndex + 1}:source:${sourceIndex + 1}`,
+              };
+            },
+          );
+          const branchJoinTypes = extractJoinTypes(branch.sql);
+          const branchNodeId = nextSubqueryId(subqueryNodeId);
+
+          subqueries.push({
+            id: branchNodeId,
+            parentNodeId: subqueryNodeId,
+            type: "union_branch",
+            label: buildSetBranchInstanceLabel(
+              setOperatorKind || branch.setOperator || "UNION",
+              branchIndex,
+              setBranches.length,
+            ),
+            statementType: detectStatementType(branch.sql),
+            sources: branchSources,
+            readSources: branchSources,
+            joinTypes: branchJoinTypes,
+            clauses: detectClauses(branch.sql, branchJoinTypes),
+            sourceCount: branchSources.length,
+            setOperator: setOperatorKind || branch.setOperator || "UNION",
+            branchCount: setBranches.length,
+            branchIndex,
+            rangeStart: branch.rangeStart,
+            rangeEnd: branch.rangeEnd,
+            ranges: [
+              {
+                start: branch.rangeStart,
+                end: branch.rangeEnd,
+              },
+            ],
+          });
+
+          walkSegment(branch.sql, branchNodeId, branch.rangeStart);
+        });
+      } else {
+        walkSegment(innerSql, subqueryNodeId, currentBaseOffset + index + 1);
+      }
       index = balanced.nextIndex;
     }
   }
@@ -1572,6 +1699,78 @@ function extractHeuristicSubqueries(sql, ownerNodeId, baseOffset = 0) {
     counters.set(parentNodeId, nextIndex);
     return `${parentNodeId}:subquery:${nextIndex}`;
   }
+}
+
+function resolveHeuristicSubqueryRanges(
+  sql,
+  openParenIndex,
+  balanced,
+  kind,
+  baseOffset = 0,
+) {
+  const innerRange = {
+    start: baseOffset + openParenIndex,
+    end: baseOffset + balanced.nextIndex,
+  };
+
+  if (kind !== "inline_view") {
+    return [innerRange];
+  }
+
+  const wrapperStart = findInlineViewWrapperStart(sql, openParenIndex);
+  const wrapperEnd = findInlineViewWrapperEnd(sql, balanced.nextIndex);
+
+  return mergeRanges(
+    [
+      {
+        start: baseOffset + wrapperStart,
+        end: baseOffset + wrapperEnd,
+      },
+    ],
+    [innerRange],
+  );
+}
+
+function findInlineViewWrapperStart(sql, openParenIndex) {
+  const prefixStart = Math.max(0, openParenIndex - 96);
+  const prefix = sql.slice(prefixStart, openParenIndex);
+  const match = /(?:from|cross\s+join|left(?:\s+outer)?\s+join|right(?:\s+outer)?\s+join|inner\s+join|full(?:\s+outer)?\s+join|join)\s*$/i.exec(
+    prefix,
+  );
+
+  return match ? prefixStart + match.index : openParenIndex;
+}
+
+function findInlineViewWrapperEnd(sql, nextIndex) {
+  let cursor = skipWhitespace(sql, nextIndex);
+
+  if (startsWithWord(sql, cursor, "as")) {
+    cursor = skipWhitespace(sql, cursor + 2);
+  }
+
+  const alias = readIdentifier(sql, cursor);
+
+  if (alias?.value && !alias.value.startsWith("(")) {
+    return alias.nextIndex;
+  }
+
+  return nextIndex;
+}
+
+function findInlineViewAlias(sql, nextIndex) {
+  let cursor = skipWhitespace(sql, nextIndex);
+
+  if (startsWithWord(sql, cursor, "as")) {
+    cursor = skipWhitespace(sql, cursor + 2);
+  }
+
+  const alias = readIdentifier(sql, cursor);
+
+  if (!alias?.value || alias.value.startsWith("(")) {
+    return "";
+  }
+
+  return stripIdentifierQuotes(alias.value);
 }
 
 function inferHeuristicSubqueryKind(sql, openParenIndex) {
@@ -1594,6 +1793,20 @@ function inferHeuristicSubqueryKind(sql, openParenIndex) {
   return "scalar_subquery";
 }
 
+function inferHeuristicInlineViewSourceRole(sql, openParenIndex) {
+  const prefix = sql.slice(Math.max(0, openParenIndex - 64), openParenIndex).toLowerCase();
+
+  if (/\b(?:cross\s+join|left(?:\s+outer)?\s+join|right(?:\s+outer)?\s+join|inner\s+join|full(?:\s+outer)?\s+join|join)\s*$/.test(prefix)) {
+    return "join";
+  }
+
+  if (/\b(?:from|using)\s*$/.test(prefix)) {
+    return "from";
+  }
+
+  return null;
+}
+
 function extractAstWrapperAst(value) {
   if (value?.ast && typeof value.ast === "object") {
     return value.ast;
@@ -1602,10 +1815,12 @@ function extractAstWrapperAst(value) {
   return value;
 }
 
-function buildSubqueryLabel(kind) {
+function buildSubqueryLabel(kind, alias = "") {
+  const normalizedAlias = String(alias || "").trim();
+
   switch (kind) {
     case "inline_view":
-      return "INLINE VIEW";
+      return normalizedAlias ? `INLINE VIEW ${normalizedAlias}` : "INLINE VIEW";
     case "exists_subquery":
       return "EXISTS";
     case "in_subquery":
@@ -1625,6 +1840,161 @@ function buildSetBranchLabel(setOperator) {
   }
 
   return `${normalized} BRANCH`;
+}
+
+function buildSetBranchInstanceLabel(setOperator, branchIndex = 0, branchCount = 0) {
+  const baseLabel = buildSetBranchLabel(setOperator);
+
+  if (branchCount <= 1) {
+    return baseLabel;
+  }
+
+  return `${baseLabel} ${branchIndex + 1}`;
+}
+
+function splitTopLevelSetBranches(sql, baseOffset = 0) {
+  const operators = ["union all", "union", "intersect", "except"];
+  const maskedSql = maskCommentsPreserveOffsets(sql);
+  const branches = [];
+  let index = 0;
+  let mode = "normal";
+  let depth = 0;
+  let segmentStart = 0;
+  let previousOperator = "";
+
+  while (index < maskedSql.length) {
+    const char = maskedSql[index];
+    const next = maskedSql[index + 1] || "";
+
+    if (mode === "single_quote") {
+      if (char === "'" && next === "'") {
+        index += 2;
+        continue;
+      }
+
+      if (char === "'") {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (mode === "double_quote") {
+      if (char === '"') {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (mode === "backtick") {
+      if (char === "`") {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (mode === "bracket") {
+      if (char === "]") {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (char === "'") {
+      mode = "single_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      mode = "double_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === "`") {
+      mode = "backtick";
+      index += 1;
+      continue;
+    }
+
+    if (char === "[") {
+      mode = "bracket";
+      index += 1;
+      continue;
+    }
+
+    if (char === "(") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (char === ")" && depth > 0) {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+
+    if (depth === 0) {
+      const operator = operators.find((candidate) => startsWithWord(maskedSql, index, candidate));
+
+      if (operator) {
+        const branch = trimSqlSegment(sql, segmentStart, index, baseOffset);
+
+        if (branch) {
+          branches.push({
+            ...branch,
+            setOperator: previousOperator || null,
+          });
+        }
+
+        previousOperator = operator.toUpperCase();
+        segmentStart = index + operator.length;
+        index = segmentStart;
+        continue;
+      }
+    }
+
+    index += 1;
+  }
+
+  const lastBranch = trimSqlSegment(sql, segmentStart, sql.length, baseOffset);
+
+  if (lastBranch) {
+    branches.push({
+      ...lastBranch,
+      setOperator: previousOperator || null,
+    });
+  }
+
+  return branches;
+}
+
+function trimSqlSegment(sql, start, end, baseOffset = 0) {
+  const rawSegment = sql.slice(start, end);
+  const leadingWhitespace = rawSegment.match(/^\s*/)?.[0].length || 0;
+  const trailingWhitespace = rawSegment.match(/\s*$/)?.[0].length || 0;
+  const trimmedStart = start + leadingWhitespace;
+  const trimmedEnd = Math.max(trimmedStart, end - trailingWhitespace);
+  const trimmedSql = sql.slice(trimmedStart, trimmedEnd);
+
+  if (!trimmedSql.trim()) {
+    return null;
+  }
+
+  return {
+    sql: trimmedSql,
+    rangeStart: baseOffset + trimmedStart,
+    rangeEnd: baseOffset + trimmedEnd,
+  };
 }
 
 function detectAstClauses(ast, joinTypes, sql) {
@@ -2877,13 +3247,40 @@ function mergeSourcesWithRanges(primarySources, rangedSources) {
       continue;
     }
 
+    const preferRangedSpans =
+      hasTemplateSyntax(source.name) ||
+      hasTemplateSyntax(ranged.name) ||
+      hasTemplateSyntax(source.label) ||
+      hasTemplateSyntax(ranged.label);
+    const sourceRanges =
+      preferRangedSpans
+        ? []
+        : source.ranges ||
+          (typeof source.rangeStart === "number" && typeof source.rangeEnd === "number"
+            ? [{ start: source.rangeStart, end: source.rangeEnd }]
+            : []);
+    const rangedRanges =
+      ranged.ranges ||
+      (typeof ranged.rangeStart === "number" && typeof ranged.rangeEnd === "number"
+        ? [{ start: ranged.rangeStart, end: ranged.rangeEnd }]
+        : []);
+    const mergedRanges = mergeRanges(sourceRanges, rangedRanges);
+
     merged.push({
       ...source,
       type: preferSourceType(source.type, ranged.type),
       sampleKind: source.sampleKind || ranged.sampleKind || "",
-      rangeStart: typeof source.rangeStart === "number" ? source.rangeStart : ranged.rangeStart,
-      rangeEnd: typeof source.rangeEnd === "number" ? source.rangeEnd : ranged.rangeEnd,
-      ranges: mergeRanges(source.ranges || [], ranged.ranges || []),
+      rangeStart:
+        mergedRanges[0]?.start ??
+        (typeof source.rangeStart === "number" && !preferRangedSpans
+          ? source.rangeStart
+          : ranged.rangeStart),
+      rangeEnd:
+        mergedRanges[0]?.end ??
+        (typeof source.rangeEnd === "number" && !preferRangedSpans
+          ? source.rangeEnd
+          : ranged.rangeEnd),
+      ranges: mergedRanges,
     });
   }
 
@@ -2921,7 +3318,7 @@ function preprocessSql(sql) {
 
   const templatedSql = sql
     .replace(/\{\{[\s\S]*?\}\}/g, (match) => {
-      const placeholder = `__TPL_EXPR_${nextTemplateId}__`;
+      const placeholder = buildTemplatePlaceholder(match, "expression", nextTemplateId);
       templates.push({
         id: nextTemplateId,
         type: "expression",
@@ -2932,10 +3329,21 @@ function preprocessSql(sql) {
       return placeholder;
     })
     .replace(/\{%[\s\S]*?%\}/g, (match) => {
-      const placeholder = `__TPL_BLOCK_${nextTemplateId}__`;
+      const placeholder = buildTemplatePlaceholder(match, "block", nextTemplateId);
       templates.push({
         id: nextTemplateId,
         type: "block",
+        placeholder,
+        raw: match,
+      });
+      nextTemplateId += 1;
+      return placeholder;
+    })
+    .replace(/\$\{[\s\S]*?\}/g, (match) => {
+      const placeholder = buildTemplatePlaceholder(match, "expression", nextTemplateId);
+      templates.push({
+        id: nextTemplateId,
+        type: "expression",
         placeholder,
         raw: match,
       });
@@ -2950,6 +3358,65 @@ function preprocessSql(sql) {
     sql: normalizeSql(withoutLineComments),
     templates,
   };
+}
+
+function buildTemplatePlaceholder(raw, type, id) {
+  const prefix = type === "block" ? "TPL_BLOCK" : "TPL_EXPR";
+  const semanticInner = String(raw || "")
+    .replace(/^\{\{|\}\}$/g, "")
+    .replace(/^\{%|%\}$/g, "")
+    .replace(/^\$\{|\}$/g, "")
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase()
+    .slice(0, 40);
+
+  return `${prefix}${semanticInner ? `_${semanticInner}` : ""}_${id}`;
+}
+
+function restoreTemplatePlaceholders(value, templates = []) {
+  if (typeof value !== "string" || !value || !templates.length) {
+    return value;
+  }
+
+  return templates
+    .slice()
+    .sort(
+      (left, right) =>
+        String(right.placeholder || "").length - String(left.placeholder || "").length,
+    )
+    .reduce(
+      (current, template) =>
+        current.replaceAll(String(template.placeholder || ""), String(template.raw || "")),
+      value,
+    );
+}
+
+function restoreTemplatePlaceholdersDeep(value, templates = []) {
+  if (!templates.length || value == null) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return restoreTemplatePlaceholders(value, templates);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => restoreTemplatePlaceholdersDeep(entry, templates));
+  }
+
+  if (typeof value === "object") {
+    const restored = {};
+
+    for (const [key, entry] of Object.entries(value)) {
+      restored[key] = restoreTemplatePlaceholdersDeep(entry, templates);
+    }
+
+    return restored;
+  }
+
+  return value;
 }
 
 function maskCommentsPreserveOffsets(sql) {
@@ -3250,11 +3717,20 @@ function splitStatementsDetailed(sql) {
 }
 
 function extractLogicalBodySql(sql, rootStatementType) {
-  if (rootStatementType === "CREATE") {
-    const asMatch = /\bas\b/i.exec(sql);
+  return extractLogicalBodySegment(sql, rootStatementType).sql;
+}
 
-    if (asMatch) {
-      return normalizeSql(sql.slice(asMatch.index + asMatch[0].length));
+function extractLogicalBodySegment(sql, rootStatementType) {
+  if (rootStatementType === "CREATE") {
+    const queryBodyMatch = /\bas\s+(with|select|values)\b/i.exec(sql);
+
+    if (queryBodyMatch) {
+      const queryKeyword = queryBodyMatch[1] || "";
+      const start = queryBodyMatch.index + queryBodyMatch[0].length - queryKeyword.length;
+      return {
+        sql: normalizeSql(sql.slice(start)),
+        start,
+      };
     }
   }
 
@@ -3262,11 +3738,49 @@ function extractLogicalBodySql(sql, rootStatementType) {
     const selectMatch = /\b(with|select)\b/i.exec(sql);
 
     if (selectMatch) {
-      return normalizeSql(sql.slice(selectMatch.index));
+      const start = selectMatch.index;
+      return {
+        sql: normalizeSql(sql.slice(start)),
+        start,
+      };
     }
   }
 
-  return sql;
+  return {
+    sql,
+    start: 0,
+  };
+}
+
+function offsetScopeInfo(scopeInfo, offset = 0) {
+  const appliedOffset = typeof offset === "number" ? offset : 0;
+
+  if (!scopeInfo || appliedOffset === 0) {
+    return scopeInfo;
+  }
+
+  return {
+    ...scopeInfo,
+    mainStatementStart:
+      typeof scopeInfo.mainStatementStart === "number"
+        ? scopeInfo.mainStatementStart + appliedOffset
+        : scopeInfo.mainStatementStart,
+    ctes: (scopeInfo.ctes || []).map((cte) => ({
+      ...cte,
+      rangeStart:
+        typeof cte.rangeStart === "number" ? cte.rangeStart + appliedOffset : cte.rangeStart,
+      rangeEnd:
+        typeof cte.rangeEnd === "number" ? cte.rangeEnd + appliedOffset : cte.rangeEnd,
+      bodyRangeStart:
+        typeof cte.bodyRangeStart === "number"
+          ? cte.bodyRangeStart + appliedOffset
+          : cte.bodyRangeStart,
+      bodyRangeEnd:
+        typeof cte.bodyRangeEnd === "number"
+          ? cte.bodyRangeEnd + appliedOffset
+          : cte.bodyRangeEnd,
+    })),
+  };
 }
 
 function extractCtes(sql) {
@@ -3414,76 +3928,164 @@ function analyzeHeuristicCtes(ctes, cteNames) {
 function extractSources(sql, baseOffset = 0) {
   const results = [];
   const maskedSql = maskCommentsPreserveOffsets(sql);
-  const regex = new RegExp(`\\b(from|join|using)\\s+(${QUALIFIED_IDENTIFIER_PATTERN})`, "gi");
-  let match = regex.exec(maskedSql);
+  let index = 0;
+  let mode = "normal";
+  let depth = 0;
 
-  while (match) {
-    const rawName = match[2];
+  while (index < maskedSql.length) {
+    const char = maskedSql[index];
+    const next = maskedSql[index + 1] || "";
 
-    if (rawName && !rawName.startsWith("(")) {
-      const localStart = match.index + match[0].lastIndexOf(rawName);
-      const localEnd = localStart + rawName.length;
+    if (mode === "single_quote") {
+      if (char === "'" && next === "'") {
+        index += 2;
+        continue;
+      }
+      if (char === "'") {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (mode === "double_quote") {
+      if (char === '"') {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (mode === "backtick") {
+      if (char === "`") {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (mode === "bracket") {
+      if (char === "]") {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === "'") {
+      mode = "single_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      mode = "double_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === "`") {
+      mode = "backtick";
+      index += 1;
+      continue;
+    }
+
+    if (char === "[") {
+      mode = "bracket";
+      index += 1;
+      continue;
+    }
+
+    if (char === "(") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (char === ")" && depth > 0) {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+
+    if (depth === 0 && startsWithWord(maskedSql, index, "lateral")) {
+      const viewIndex = skipWhitespace(maskedSql, index + "lateral".length);
+
+      if (startsWithWord(maskedSql, viewIndex, "view")) {
+        const localStart = index;
+        const localEnd = viewIndex + "view".length;
+        results.push({
+          name: "LATERAL VIEW",
+          type: "lateral_view",
+          rangeStart: baseOffset + localStart,
+          rangeEnd: baseOffset + localEnd,
+          ranges: [
+            {
+              start: baseOffset + localStart,
+              end: baseOffset + localEnd,
+            },
+          ],
+        });
+        index = localEnd;
+        continue;
+      }
+    }
+
+    let keyword = "";
+
+    if (depth === 0 && startsWithWord(maskedSql, index, "from")) {
+      keyword = "from";
+    } else if (depth === 0 && startsWithWord(maskedSql, index, "join")) {
+      keyword = "join";
+    } else if (depth === 0 && startsWithWord(maskedSql, index, "using")) {
+      keyword = "using";
+    }
+
+    if (!keyword) {
+      index += 1;
+      continue;
+    }
+
+    const token = readIdentifier(sql, index + keyword.length);
+
+    if (!token || token.value.startsWith("(")) {
+      index += keyword.length;
+      continue;
+    }
+
+    const normalizedToken = normalizeName(token.value);
+
+    if (normalizedToken === "unnest" && sql[token.nextIndex] === "(") {
       results.push({
-        name: stripIdentifierQuotes(rawName),
-        type: match[1].toLowerCase(),
-        rangeStart: baseOffset + localStart,
-        rangeEnd: baseOffset + localEnd,
+        name: "UNNEST",
+        type: "unnest",
+        rangeStart: baseOffset + token.startIndex,
+        rangeEnd: baseOffset + token.nextIndex,
         ranges: [
           {
-            start: baseOffset + localStart,
-            end: baseOffset + localEnd,
+            start: baseOffset + token.startIndex,
+            end: baseOffset + token.nextIndex,
           },
         ],
       });
+      index = token.nextIndex;
+      continue;
     }
 
-    match = regex.exec(maskedSql);
-  }
-
-  const unnestRegex =
-    /\b(?:from|join|cross\s+join|left\s+join|right\s+join|inner\s+join|full\s+join)\s+(unnest)\s*\(/gi;
-  match = unnestRegex.exec(maskedSql);
-
-  while (match) {
-    const localStart = match.index + match[0].lastIndexOf(match[1]);
-    const localEnd = localStart + match[1].length;
     results.push({
-      name: "UNNEST",
-      type: "unnest",
-      rangeStart: baseOffset + localStart,
-      rangeEnd: baseOffset + localEnd,
+      name: stripIdentifierQuotes(token.value),
+      type: keyword,
+      rangeStart: baseOffset + token.startIndex,
+      rangeEnd: baseOffset + token.nextIndex,
       ranges: [
         {
-          start: baseOffset + localStart,
-          end: baseOffset + localEnd,
+          start: baseOffset + token.startIndex,
+          end: baseOffset + token.nextIndex,
         },
       ],
     });
 
-    match = unnestRegex.exec(maskedSql);
-  }
-
-  const lateralViewRegex =
-    /\blateral\s+view(?:\s+outer)?\s+([a-z_][a-z0-9_]*)\s*\(/gi;
-  match = lateralViewRegex.exec(maskedSql);
-
-  while (match) {
-    const localStart = match.index;
-    const localEnd = localStart + match[0].indexOf(match[1]) + match[1].length;
-    results.push({
-      name: "LATERAL VIEW",
-      type: "lateral_view",
-      rangeStart: baseOffset + localStart,
-      rangeEnd: baseOffset + localEnd,
-      ranges: [
-        {
-          start: baseOffset + localStart,
-          end: baseOffset + localEnd,
-        },
-      ],
-    });
-
-    match = lateralViewRegex.exec(maskedSql);
+    index = token.nextIndex;
   }
 
   return mergeSourceMatches(results);
@@ -3508,7 +4110,7 @@ function extractExternalReads(statementSources, ctes, cteNames) {
 }
 
 function extractWrites(sql) {
-  const normalized = normalizeSql(sql);
+  const normalized = normalizeSql(maskCommentsPreserveOffsets(sql));
   const patterns = [
     {
       kind: "create_table",
@@ -3529,6 +4131,13 @@ function extractWrites(sql) {
       regex: new RegExp(`^\\s*insert\\s+into\\s+(${QUALIFIED_IDENTIFIER_PATTERN})`, "i"),
     },
     {
+      kind: "insert_overwrite",
+      regex: new RegExp(
+        `^\\s*insert\\s+overwrite\\s+(?:table\\s+)?(${QUALIFIED_IDENTIFIER_PATTERN})`,
+        "i",
+      ),
+    },
+    {
       kind: "merge_into",
       regex: new RegExp(`^\\s*merge\\s+into\\s+(${QUALIFIED_IDENTIFIER_PATTERN})`, "i"),
     },
@@ -3540,6 +4149,24 @@ function extractWrites(sql) {
       kind: "delete_from",
       regex: new RegExp(`^\\s*delete\\s+from\\s+(${QUALIFIED_IDENTIFIER_PATTERN})`, "i"),
     },
+    {
+      kind: "drop_table",
+      regex: new RegExp(
+        `^\\s*drop\\s+(?:temporary\\s+|temp\\s+)?table\\s+(?:if\\s+exists\\s+)?(${QUALIFIED_IDENTIFIER_PATTERN})`,
+        "i",
+      ),
+    },
+    {
+      kind: "drop_view",
+      regex: new RegExp(
+        `^\\s*drop\\s+(?:materialized\\s+)?view\\s+(?:if\\s+exists\\s+)?(${QUALIFIED_IDENTIFIER_PATTERN})`,
+        "i",
+      ),
+    },
+    {
+      kind: "alter_table",
+      regex: new RegExp(`^\\s*alter\\s+table\\s+(${QUALIFIED_IDENTIFIER_PATTERN})`, "i"),
+    },
   ];
 
   const writes = [];
@@ -3548,9 +4175,22 @@ function extractWrites(sql) {
     const match = normalized.match(pattern.regex);
 
     if (match?.[1]) {
+      const targetName = stripIdentifierQuotes(match[1]);
+      const prefix = String(match[0] || "");
+      const relativeStart = prefix.indexOf(match[1]);
+      const rangeStart =
+        typeof match.index === "number" && relativeStart >= 0 ? match.index + relativeStart : null;
+      const rangeEnd =
+        typeof rangeStart === "number" ? rangeStart + String(match[1]).length : null;
       writes.push({
-        name: stripIdentifierQuotes(match[1]),
+        name: targetName,
         kind: pattern.kind,
+        rangeStart,
+        rangeEnd,
+        ranges:
+          typeof rangeStart === "number" && typeof rangeEnd === "number"
+            ? [{ start: rangeStart, end: rangeEnd }]
+            : [],
       });
     }
   }
@@ -3558,22 +4198,18 @@ function extractWrites(sql) {
   return uniqueByName(writes);
 }
 
-function extractJoinTypes(sql) {
-  const joins = [];
-  const maskedSql = maskCommentsPreserveOffsets(sql);
-  const regex = /\b((left|right|inner|full|cross)\s+)?join\b|\busing\b/gi;
-  let match = regex.exec(maskedSql);
+function isCleanupWriteStatementType(statementType, writes = []) {
+  const normalizedType = String(statementType || "").trim().toUpperCase();
 
-  while (match) {
-    if (/^using$/i.test(match[0])) {
-      joins.push("USING");
-    } else {
-      joins.push((match[1] || "join").trim().toUpperCase());
-    }
-    match = regex.exec(maskedSql);
+  if (!["DROP", "ALTER"].includes(normalizedType)) {
+    return false;
   }
 
-  return joins;
+  return Array.isArray(writes) && writes.length > 0;
+}
+
+function extractJoinTypes(sql) {
+  return extractTopLevelJoinMatches(sql).map((match) => match.type);
 }
 
 function detectClauses(sql, joinTypes) {
@@ -3594,7 +4230,7 @@ function detectClauses(sql, joinTypes) {
     having: hasTopLevelKeyword(maskedSql, "having"),
     window: /\bover\s*\(|\bwindow\b/i.test(maskedSql),
     qualify: hasTopLevelKeyword(maskedSql, "qualify"),
-    union: /\b(?:union(?:\s+all)?|intersect|except)\b/i.test(maskedSql),
+    union: Boolean(detectSetOperatorKind(maskedSql)),
     orderBy: hasTopLevelPhrase(maskedSql, "order", "by"),
     limit: hasTopLevelKeyword(maskedSql, "limit"),
     offset: hasTopLevelKeyword(maskedSql, "offset"),
@@ -3701,8 +4337,125 @@ function emptyClauses() {
   };
 }
 
+function detectStandaloneDirective(sql) {
+  const normalized = normalizeSql(sql);
+
+  if (!normalized) {
+    return null;
+  }
+
+  const templateOnlyMatch = normalized.match(
+    /^(\{\{[\s\S]*\}\}|\{%[\s\S]*%\}|\$\{[\s\S]*\})\s*;?$/,
+  );
+
+  if (templateOnlyMatch) {
+    return {
+      statementType: "CONFIG",
+      title: "CONFIG TEMPLATE",
+      directiveName: templateOnlyMatch[1],
+      graphNodeType: "directive",
+    };
+  }
+
+  const useMatch = normalized.match(/^use\s+(.+)$/i);
+
+  if (useMatch) {
+    const target = String(useMatch[1] || "").replace(/;+\s*$/g, "").trim();
+    return {
+      statementType: "USE",
+      title: target ? `USE ${target}` : "USE",
+      directiveName: target,
+      graphNodeType: "directive",
+    };
+  }
+
+  const setMatch = normalized.match(/^set\s+(.+?)(?:\s*=\s*[\s\S]+|\s*)$/i);
+
+  if (!setMatch) {
+    return null;
+  }
+
+  const directiveName = String(setMatch[1] || "")
+    .replace(/;+\s*$/g, "")
+    .trim();
+  const directiveLabel = directiveName ? `SET ${directiveName}` : "SET";
+
+  return {
+    statementType: "SET",
+    title: directiveLabel,
+    directiveName,
+    graphNodeType: "directive",
+  };
+}
+
+function buildDirectiveStatement(statementInput, index, sql, directiveInfo) {
+  const rangeStart = typeof statementInput?.rangeStart === "number" ? statementInput.rangeStart : 0;
+  const rangeEnd =
+    typeof statementInput?.rangeEnd === "number" ? statementInput.rangeEnd : sql.length;
+  const nodeId = "directive:main";
+
+  return {
+    id: `statement:${index}`,
+    index,
+    title: `#${index + 1} ${directiveInfo.title}`,
+    sql,
+    sqlPreview: createSqlPreview(sql),
+    rangeStart,
+    rangeEnd,
+    mode: "heuristic",
+    parserDialect: null,
+    parserEngine: null,
+    parserAttempts: [],
+    parserErrorMessage: null,
+    normalizedSql: sql,
+    statementType: directiveInfo.statementType,
+    logicalStatementType: directiveInfo.statementType,
+    clauses: emptyClauses(),
+    joins: [],
+    flowSequence: [directiveInfo.statementType],
+    graph: {
+      nodes: [
+        {
+          id: nodeId,
+          type: directiveInfo.graphNodeType,
+          label: directiveInfo.title,
+          meta: {
+            directiveType: directiveInfo.statementType,
+            directiveName: directiveInfo.directiveName,
+            rangeStart: 0,
+            rangeEnd: sql.length,
+            ranges: [{ start: 0, end: sql.length }],
+          },
+        },
+      ],
+      edges: [],
+      columns: [],
+    },
+    ctes: [],
+    sources: [],
+    reads: [],
+    writes: [],
+    dependencies: [],
+    dependents: [],
+    summary: {
+      cteCount: 0,
+      sourceCount: 0,
+      joinCount: 0,
+      clauseCount: 0,
+      templateCount: 0,
+      statementType: directiveInfo.statementType,
+    },
+  };
+}
+
 function detectRootStatementType(sql) {
-  const match = normalizeSql(sql).match(/^(with|select|insert|update|delete|create|merge)\b/i);
+  const structuralSql = normalizeSql(maskCommentsPreserveOffsets(sql));
+
+  if (detectStandaloneDirective(structuralSql)) {
+    return "SET";
+  }
+
+  const match = structuralSql.match(/^(with|select|insert|update|delete|create|drop|alter|merge)\b/i);
 
   if (!match) {
     return "UNKNOWN";
@@ -3716,7 +4469,13 @@ function detectRootStatementType(sql) {
 }
 
 function detectStatementType(sql) {
-  const match = normalizeSql(sql).match(/^(with|select|insert|update|delete|create|merge)\b/i);
+  const structuralSql = normalizeSql(maskCommentsPreserveOffsets(sql));
+
+  if (detectStandaloneDirective(structuralSql)) {
+    return "SET";
+  }
+
+  const match = structuralSql.match(/^(with|select|insert|update|delete|create|drop|alter|merge)\b/i);
 
   if (!match) {
     return "UNKNOWN";
@@ -3737,6 +4496,14 @@ function buildFlowSequence(
   setOperatorKind = "",
   conflictKind = "",
 ) {
+  if (statementType === "SET") {
+    return ["SET"];
+  }
+
+  if (isCleanupWriteStatementType(statementType, writes)) {
+    return [statementType, "WRITE"];
+  }
+
   const flow = [statementType];
 
   for (const clause of CLAUSE_ORDER) {
@@ -3768,7 +4535,7 @@ function extractClauseRanges(sql, baseOffset = 0) {
   const maskedSql = maskCommentsPreserveOffsets(sql);
   const patterns = [
     { key: "distinct", regex: /^\s*select\s+distinct(?:\s+on)?\b/i },
-    { key: "join", regex: /\b((left|right|inner|full|cross)\s+)?join\b/i },
+    { key: "join", regex: null },
     { key: "mergeOn", regex: null },
     { key: "matched", regex: /\bwhen\s+matched\b/i },
     { key: "notMatched", regex: /\bwhen\s+not\s+matched\b/i },
@@ -3802,6 +4569,19 @@ function extractClauseRanges(sql, baseOffset = 0) {
         };
       }
 
+      if (pattern.key === "join") {
+        const firstJoinMatch = extractTopLevelJoinMatches(maskedSql)[0] || null;
+
+        if (!firstJoinMatch) {
+          return null;
+        }
+
+        return {
+          key: pattern.key,
+          start: baseOffset + firstJoinMatch.start,
+        };
+      }
+
       const match = pattern.regex.exec(maskedSql);
 
       if (!match || typeof match.index !== "number") {
@@ -3828,6 +4608,194 @@ function extractClauseRanges(sql, baseOffset = 0) {
   return ranges;
 }
 
+function extractTopLevelJoinMatches(sql) {
+  const input = String(sql || "");
+  const maskedSql = maskCommentsPreserveOffsets(input);
+  const matches = [];
+  const modifierWords = new Set(["left", "right", "inner", "full", "cross"]);
+  const extensionWords = new Set(["outer", "semi", "anti"]);
+  let index = 0;
+  let depth = 0;
+  let mode = "normal";
+  let dollarTag = null;
+  let pendingModifier = "";
+  let pendingModifierStart = -1;
+
+  while (index < maskedSql.length) {
+    const char = maskedSql[index];
+    const next = maskedSql[index + 1] || "";
+
+    if (mode === "single_quote") {
+      if (char === "'" && next === "'") {
+        index += 2;
+        continue;
+      }
+
+      if (char === "'") {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (mode === "double_quote") {
+      if (char === '"') {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (mode === "backtick") {
+      if (char === "`") {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (mode === "bracket") {
+      if (char === "]") {
+        mode = "normal";
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (mode === "dollar_quote") {
+      if (dollarTag && maskedSql.slice(index, index + dollarTag.length) === dollarTag) {
+        index += dollarTag.length;
+        mode = "normal";
+        dollarTag = null;
+        continue;
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (char === "'") {
+      mode = "single_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      mode = "double_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === "`") {
+      mode = "backtick";
+      index += 1;
+      continue;
+    }
+
+    if (char === "[") {
+      mode = "bracket";
+      index += 1;
+      continue;
+    }
+
+    if (char === "$") {
+      const dollarMatch = maskedSql.slice(index).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$/);
+
+      if (dollarMatch) {
+        dollarTag = dollarMatch[0];
+        mode = "dollar_quote";
+        index += dollarTag.length;
+        continue;
+      }
+    }
+
+    if (char === "(") {
+      depth += 1;
+      pendingModifier = "";
+      pendingModifierStart = -1;
+      index += 1;
+      continue;
+    }
+
+    if (char === ")" && depth > 0) {
+      depth -= 1;
+      pendingModifier = "";
+      pendingModifierStart = -1;
+      index += 1;
+      continue;
+    }
+
+    if (depth > 0) {
+      index += 1;
+      continue;
+    }
+
+    if (/[A-Za-z_]/.test(char)) {
+      let wordEnd = index + 1;
+
+      while (wordEnd < maskedSql.length && /[A-Za-z_]/.test(maskedSql[wordEnd])) {
+        wordEnd += 1;
+      }
+
+      const word = maskedSql.slice(index, wordEnd).toLowerCase();
+
+      if (modifierWords.has(word)) {
+        pendingModifier = word.toUpperCase();
+        pendingModifierStart = index;
+        index = wordEnd;
+        continue;
+      }
+
+      if (extensionWords.has(word) && pendingModifier) {
+        index = wordEnd;
+        continue;
+      }
+
+      if (word === "join") {
+        matches.push({
+          type: pendingModifier || "JOIN",
+          start: pendingModifierStart >= 0 ? pendingModifierStart : index,
+          end: wordEnd,
+        });
+        pendingModifier = "";
+        pendingModifierStart = -1;
+        index = wordEnd;
+        continue;
+      }
+
+      if (word === "using") {
+        matches.push({
+          type: "USING",
+          start: index,
+          end: wordEnd,
+        });
+        pendingModifier = "";
+        pendingModifierStart = -1;
+        index = wordEnd;
+        continue;
+      }
+
+      pendingModifier = "";
+      pendingModifierStart = -1;
+      index = wordEnd;
+      continue;
+    }
+
+    if (!/\s/.test(char)) {
+      pendingModifier = "";
+      pendingModifierStart = -1;
+    }
+
+    index += 1;
+  }
+
+  return matches;
+}
+
 function buildGraph({
   statementType,
   ctes,
@@ -3846,10 +4814,12 @@ function buildGraph({
   mainStatementSql,
   mainStatementStart,
   statementRangeEnd,
+  statementSql = "",
 }) {
   const nodes = [];
   const edges = [];
   const sourceNodeMap = new Map();
+  const sourceInstanceNodeMap = new Map();
   const cteNodeMap = new Map();
   const subqueryNodeMap = new Map();
   const clauseRanges = extractClauseRanges(mainStatementSql || "", mainStatementStart || 0);
@@ -3858,6 +4828,19 @@ function buildGraph({
     ...(statementSubqueries || []),
     ...ctes.flatMap((cte) => cte.subqueries || []),
   ];
+  const unionBranchChildrenByParent = new Map();
+
+  for (const subquery of graphSubqueries) {
+    if (subquery?.type !== "union_branch" || !subquery.parentNodeId) {
+      continue;
+    }
+
+    if (!unionBranchChildrenByParent.has(subquery.parentNodeId)) {
+      unionBranchChildrenByParent.set(subquery.parentNodeId, []);
+    }
+
+    unionBranchChildrenByParent.get(subquery.parentNodeId)?.push(subquery);
+  }
 
   for (const cte of ctes) {
     const nodeId = `cte:${cte.name}`;
@@ -3880,12 +4863,18 @@ function buildGraph({
     }
 
     const existing = sourceMetaByName.get(normalizedName);
+    const directTemplateRanges =
+      hasTemplateSyntax(source.name) && statementSql
+        ? findExactIdentifierRanges(statementSql, source.name)
+        : [];
     const nextRanges = mergeRanges(
       existing.ranges,
-      source.ranges ||
-        (typeof source.rangeStart === "number" && typeof source.rangeEnd === "number"
-          ? [{ start: source.rangeStart, end: source.rangeEnd }]
-          : []),
+      directTemplateRanges.length
+        ? directTemplateRanges
+        : source.ranges ||
+            (typeof source.rangeStart === "number" && typeof source.rangeEnd === "number"
+              ? [{ start: source.rangeStart, end: source.rangeEnd }]
+              : []),
     );
     const primaryRange = nextRanges[0] || null;
 
@@ -3956,6 +4945,31 @@ function buildGraph({
 
   for (const subquery of graphSubqueries) {
     subqueryNodeMap.set(subquery.id, subquery.id);
+    const unionBranchChildren = unionBranchChildrenByParent.get(subquery.id) || [];
+    const branchCount =
+      typeof subquery.branchCount === "number" && subquery.branchCount > 0
+        ? subquery.branchCount
+        : unionBranchChildren.length
+          ? unionBranchChildren.length + 1
+          : 0;
+    const resolvedSetOperator =
+      subquery.setOperator ||
+      String(unionBranchChildren[0]?.setOperator || "").trim().toUpperCase() ||
+      null;
+    const subqueryRanges = mergeRanges(
+      Array.isArray(subquery.ranges)
+        ? subquery.ranges.filter(
+            (range) =>
+              range &&
+              typeof range === "object" &&
+              typeof range.start === "number" &&
+              typeof range.end === "number",
+          )
+        : [],
+      typeof subquery.rangeStart === "number" && typeof subquery.rangeEnd === "number"
+        ? [{ start: subquery.rangeStart, end: subquery.rangeEnd }]
+        : [],
+    );
     nodes.push({
       id: subquery.id,
       type: subquery.type,
@@ -3963,8 +4977,18 @@ function buildGraph({
       meta: {
         sourceCount: subquery.sourceCount ?? subquery.sources?.length ?? 0,
         clauseCount: Object.values(subquery.clauses || {}).filter(Boolean).length,
+        joinTypes: Array.isArray(subquery.joinTypes) ? subquery.joinTypes.filter(Boolean) : [],
         parentNodeId: subquery.parentNodeId || null,
-        setOperator: subquery.setOperator || null,
+        setOperator: resolvedSetOperator,
+        branchCount,
+        branchIndex:
+          typeof subquery.branchIndex === "number" ? Number(subquery.branchIndex) : null,
+        hasExplicitSetBranches:
+          Boolean(subquery.hasExplicitSetBranches) || unionBranchChildren.length > 1,
+        alias: subquery.alias || null,
+        rangeStart: subqueryRanges[0]?.start ?? subquery.rangeStart ?? null,
+        rangeEnd: subqueryRanges[0]?.end ?? subquery.rangeEnd ?? null,
+        ranges: subqueryRanges,
       },
     });
   }
@@ -3981,6 +5005,7 @@ function buildGraph({
   });
 
   let previousNodeId = statementNodeId;
+  const cleanupWriteOnlyStatement = isCleanupWriteStatementType(statementType, writes);
 
   for (const clause of CLAUSE_ORDER) {
     if (!clauses[clause.key]) {
@@ -4026,18 +5051,21 @@ function buildGraph({
     previousNodeId = clauseNodeId;
   }
 
-  const resultNodeId = "result:main";
-  nodes.push({
-    id: resultNodeId,
-    type: "result",
-    label: "RESULT",
-  });
-  edges.push({
-    id: `edge:${previousNodeId}->${resultNodeId}`,
-    source: previousNodeId,
-    target: resultNodeId,
-    type: "feeds_result",
-  });
+  const resultNodeId = cleanupWriteOnlyStatement ? null : "result:main";
+
+  if (resultNodeId) {
+    nodes.push({
+      id: resultNodeId,
+      type: "result",
+      label: "RESULT",
+    });
+    edges.push({
+      id: `edge:${previousNodeId}->${resultNodeId}`,
+      source: previousNodeId,
+      target: resultNodeId,
+      type: "feeds_result",
+    });
+  }
 
   for (const [index, write] of (writes || []).entries()) {
     const writeNodeId = `write:${write.kind || "write"}:${normalizeName(write.name)}:${index}`;
@@ -4047,11 +5075,14 @@ function buildGraph({
       label: write.name,
       meta: {
         writeKind: write.kind || "write",
+        rangeStart: write.rangeStart ?? null,
+        rangeEnd: write.rangeEnd ?? null,
+        ranges: Array.isArray(write.ranges) ? write.ranges : [],
       },
     });
     edges.push({
-      id: `edge:${resultNodeId}->${writeNodeId}`,
-      source: resultNodeId,
+      id: `edge:${cleanupWriteOnlyStatement ? previousNodeId : resultNodeId}->${writeNodeId}`,
+      source: cleanupWriteOnlyStatement ? previousNodeId : resultNodeId,
       target: writeNodeId,
       type: "writes_to",
     });
@@ -4106,8 +5137,28 @@ function buildGraph({
 
   for (const subquery of graphSubqueries) {
     const targetNodeId = subquery.id;
+    const skipDirectSources =
+      subquery.type !== "union_branch" && Boolean(subquery.hasExplicitSetBranches);
 
-    for (const source of subquery.sources || []) {
+    if (skipDirectSources) {
+      const parentNodeId =
+        subqueryNodeMap.get(subquery.parentNodeId) ||
+        cteNodeMap.get(normalizeName(subquery.parentNodeId)) ||
+        (subquery.parentNodeId === "statement:main" ? statementNodeId : null);
+
+      if (parentNodeId) {
+        edges.push({
+          id: `edge:${targetNodeId}->${parentNodeId}:subquery-parent`,
+          source: targetNodeId,
+          target: parentNodeId,
+          type: "subquery_for",
+        });
+      }
+
+      continue;
+    }
+
+    for (const [sourceIndex, source] of (subquery.sources || []).entries()) {
       const sourceName = normalizeName(source.name);
 
       if (cteNodeMap.has(sourceName)) {
@@ -4121,7 +5172,37 @@ function buildGraph({
         continue;
       }
 
-      let sourceNodeId = sourceNodeMap.get(sourceName);
+      const useInstanceNode = subquery.type === "union_branch";
+      let sourceNodeId = null;
+
+      if (useInstanceNode) {
+        const instanceKey =
+          source.instanceKey ||
+          `${targetNodeId}:${sourceIndex}:${source.ranges?.map((range) => `${range.start}:${range.end}`).join(",") || source.name}`;
+
+        sourceNodeId = sourceInstanceNodeMap.get(instanceKey);
+
+        if (!sourceNodeId) {
+          sourceNodeId = `source:${normalizeName(source.name)}:${targetNodeId}:${sourceIndex}`;
+          sourceInstanceNodeMap.set(instanceKey, sourceNodeId);
+          const instanceRanges = resolveSourceInstanceRanges(statementSql, source);
+          nodes.push({
+            id: sourceNodeId,
+            type: resolveSourceNodeType(source),
+            label: source.name,
+            meta: {
+              sourceType: source.type || "from",
+              sampleKind: source.sampleKind || "",
+              rangeStart: instanceRanges[0]?.start ?? source.rangeStart ?? source.ranges?.[0]?.start ?? null,
+              rangeEnd: instanceRanges[0]?.end ?? source.rangeEnd ?? source.ranges?.[0]?.end ?? null,
+              ranges: instanceRanges,
+              sourceInstance: true,
+            },
+          });
+        }
+      } else {
+        sourceNodeId = sourceNodeMap.get(sourceName);
+      }
 
       if (!sourceNodeId) {
         sourceNodeId = `source:${source.name}`;
@@ -4162,6 +5243,7 @@ function buildGraph({
         source: targetNodeId,
         target: parentNodeId,
         type: "subquery_for",
+        sourceRole: normalizeEdgeSourceRole(subquery.sourceRole),
       });
     }
   }
@@ -4368,9 +5450,99 @@ function resolveSourceNodeType(source) {
 
 function detectSetOperatorKind(sql) {
   const maskedSql = maskCommentsPreserveOffsets(sql);
-  const match = /\b(union(?:\s+all)?|intersect|except)\b/i.exec(maskedSql);
+  const operators = ["union all", "union", "intersect", "except"];
+  let index = 0;
+  let mode = "normal";
+  let depth = 0;
 
-  return match ? String(match[1] || "").trim().toUpperCase() : "";
+  while (index < maskedSql.length) {
+    const char = maskedSql[index];
+    const next = maskedSql[index + 1] || "";
+
+    if (mode === "single_quote") {
+      if (char === "'" && next === "'") {
+        index += 2;
+        continue;
+      }
+      if (char === "'") {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (mode === "double_quote") {
+      if (char === '"') {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (mode === "backtick") {
+      if (char === "`") {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (mode === "bracket") {
+      if (char === "]") {
+        mode = "normal";
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === "'") {
+      mode = "single_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      mode = "double_quote";
+      index += 1;
+      continue;
+    }
+
+    if (char === "`") {
+      mode = "backtick";
+      index += 1;
+      continue;
+    }
+
+    if (char === "[") {
+      mode = "bracket";
+      index += 1;
+      continue;
+    }
+
+    if (char === "(") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (char === ")" && depth > 0) {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+
+    if (depth === 0) {
+      for (const operator of operators) {
+        if (startsWithWord(maskedSql, index, operator)) {
+          return operator.toUpperCase();
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return "";
 }
 
 function buildSetOperatorLabel(setOperatorKind) {
@@ -4574,6 +5746,47 @@ function mergeSourceMatches(items) {
   return Array.from(merged.values());
 }
 
+function resolveSourceInstanceRanges(statementSql, source) {
+  const fallbackRanges =
+    source?.ranges ||
+    (typeof source?.rangeStart === "number" && typeof source?.rangeEnd === "number"
+      ? [{ start: source.rangeStart, end: source.rangeEnd }]
+      : []);
+
+  if (!statementSql || !hasTemplateSyntax(source?.name)) {
+    return fallbackRanges;
+  }
+
+  const exactRanges = findExactIdentifierRanges(statementSql, source.name);
+
+  if (!exactRanges.length) {
+    return fallbackRanges;
+  }
+
+  if (!fallbackRanges.length) {
+    return [exactRanges[0]];
+  }
+
+  const anchor = fallbackRanges[0];
+  const ranked = exactRanges
+    .map((range) => ({
+      range,
+      overlap: Math.max(0, Math.min(range.end, anchor.end) - Math.max(range.start, anchor.start)),
+      distance: Math.abs(range.start - anchor.start) + Math.abs(range.end - anchor.end),
+    }))
+    .sort((left, right) => {
+      const overlapDelta = right.overlap - left.overlap;
+
+      if (overlapDelta !== 0) {
+        return overlapDelta;
+      }
+
+      return left.distance - right.distance;
+    });
+
+  return ranked[0]?.range ? [ranked[0].range] : fallbackRanges;
+}
+
 function mergeRanges(leftRanges, rightRanges) {
   const ranges = [...leftRanges, ...rightRanges]
     .filter((range) => typeof range?.start === "number" && typeof range?.end === "number")
@@ -4640,6 +5853,51 @@ function normalizeSql(sql) {
   return sql.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ").trim();
 }
 
+function hasTemplateSyntax(value) {
+  return /(\{\{[\s\S]*?\}\}|\{%[\s\S]*?%}|\$\{[^}]+\})/.test(String(value || ""));
+}
+
+function findExactIdentifierRanges(sql, identifier) {
+  const input = String(sql || "");
+  const target = String(identifier || "");
+
+  if (!input || !target) {
+    return [];
+  }
+
+  const maskedSql = maskCommentsPreserveOffsets(input);
+  const lowerSql = maskedSql.toLowerCase();
+  const lowerTarget = target.toLowerCase();
+  const ranges = [];
+  let index = 0;
+
+  while (index < lowerSql.length) {
+    const matchIndex = lowerSql.indexOf(lowerTarget, index);
+
+    if (matchIndex < 0) {
+      break;
+    }
+
+    const before = matchIndex === 0 ? "" : maskedSql[matchIndex - 1];
+    const after = maskedSql[matchIndex + target.length] || "";
+
+    if (isIdentifierBoundary(before) && isIdentifierBoundary(after)) {
+      ranges.push({
+        start: matchIndex,
+        end: matchIndex + target.length,
+      });
+    }
+
+    index = matchIndex + Math.max(target.length, 1);
+  }
+
+  return ranges;
+}
+
+function isIdentifierBoundary(char) {
+  return !char || !/[a-zA-Z0-9_$]/.test(char);
+}
+
 function createSqlPreview(sql) {
   if (!sql) {
     return "";
@@ -4696,7 +5954,9 @@ function readIdentifier(sql, index) {
     };
   }
 
-  const match = /^[a-zA-Z0-9_.-]+/.exec(sql.slice(start));
+  const match = new RegExp(
+    `^(?:${IDENTIFIER_ATOM_PATTERN})(?:\\.(?:${IDENTIFIER_ATOM_PATTERN}))*`,
+  ).exec(sql.slice(start));
 
   if (!match) {
     return null;
@@ -4712,9 +5972,100 @@ function readIdentifier(sql, index) {
 function readBalanced(sql, index, openChar, closeChar) {
   let depth = 0;
   let cursor = index;
+  let mode = "normal";
+  let dollarTag = null;
 
   while (cursor < sql.length) {
     const char = sql[cursor];
+    const next = sql[cursor + 1] || "";
+
+    if (mode === "single_quote") {
+      if (char === "'" && next === "'") {
+        cursor += 2;
+        continue;
+      }
+
+      if (char === "'") {
+        mode = "normal";
+      }
+
+      cursor += 1;
+      continue;
+    }
+
+    if (mode === "double_quote") {
+      if (char === '"') {
+        mode = "normal";
+      }
+
+      cursor += 1;
+      continue;
+    }
+
+    if (mode === "backtick") {
+      if (char === "`") {
+        mode = "normal";
+      }
+
+      cursor += 1;
+      continue;
+    }
+
+    if (mode === "bracket") {
+      if (char === "]") {
+        mode = "normal";
+      }
+
+      cursor += 1;
+      continue;
+    }
+
+    if (mode === "dollar_quote") {
+      if (dollarTag && sql.slice(cursor, cursor + dollarTag.length) === dollarTag) {
+        cursor += dollarTag.length;
+        mode = "normal";
+        dollarTag = null;
+        continue;
+      }
+
+      cursor += 1;
+      continue;
+    }
+
+    if (char === "'") {
+      mode = "single_quote";
+      cursor += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      mode = "double_quote";
+      cursor += 1;
+      continue;
+    }
+
+    if (char === "`") {
+      mode = "backtick";
+      cursor += 1;
+      continue;
+    }
+
+    if (char === "[") {
+      mode = "bracket";
+      cursor += 1;
+      continue;
+    }
+
+    if (char === "$") {
+      const tagMatch = /^\$[a-zA-Z0-9_]*\$/.exec(sql.slice(cursor));
+
+      if (tagMatch) {
+        dollarTag = tagMatch[0];
+        mode = "dollar_quote";
+        cursor += dollarTag.length;
+        continue;
+      }
+    }
 
     if (char === openChar) {
       depth += 1;

@@ -378,9 +378,51 @@
     style.textContent = `
       .${EDITOR_HIGHLIGHT_CLASS} {
         position: absolute;
-        background: rgba(97, 122, 145, 0.18);
+        pointer-events: none;
+        background: rgba(97, 122, 145, 0.1);
         border-radius: 4px;
-        box-shadow: inset 0 0 0 1px rgba(97, 122, 145, 0.32);
+        box-shadow: inset 0 0 0 1px rgba(97, 122, 145, 0.18);
+      }
+
+      .ace_editor .ace_cursor {
+        color: #111827 !important;
+        border-left-color: #111827 !important;
+        opacity: 1 !important;
+      }
+
+      .ace_editor .ace_cursor-layer,
+      .ace_editor .ace_cursor-layer .ace_cursor,
+      .monaco-editor .cursors-layer,
+      .monaco-editor .cursors-layer .cursor,
+      .cm-editor .cm-cursorLayer,
+      .cm-editor .cm-cursor,
+      .CodeMirror-cursors,
+      .CodeMirror-cursor {
+        mix-blend-mode: normal !important;
+        filter: none !important;
+        opacity: 1 !important;
+      }
+
+      .monaco-editor .cursors-layer .cursor {
+        background-color: #111827 !important;
+        border-color: #111827 !important;
+      }
+
+      .cm-editor .cm-cursor,
+      .CodeMirror-cursor {
+        border-left-color: #111827 !important;
+        border-right-color: #111827 !important;
+      }
+
+      .ace_editor textarea.ace_text-input,
+      .monaco-editor textarea,
+      .monaco-editor input,
+      .cm-editor textarea,
+      .CodeMirror textarea,
+      [data-test='sql-editor'] textarea,
+      [data-test='code-editor'] textarea,
+      textarea.sql-editor {
+        caret-color: #111827 !important;
       }
     `;
     (document.head || document.documentElement).appendChild(style);

@@ -1,4 +1,5 @@
 import type { AnalysisResult } from "../../../shared/types";
+import { buildStatementDisplayGroups } from "../../features/sql/statement-groups";
 import { useGraphStore } from "../../state/graph-store";
 
 interface StatementOutlineProps {
@@ -16,6 +17,7 @@ export function StatementOutline({
 }: StatementOutlineProps) {
   const { selectedStatementIndex, selectStatementIndex } = useGraphStore();
   const statements = analysis?.statements || [];
+  const displayGroups = buildStatementDisplayGroups(statements);
   const selectionSignature = buildSelectionSignature(
     sqlSelectionText,
     sqlSelectionStart,
@@ -38,18 +40,20 @@ export function StatementOutline({
           <p className="section-eyebrow">Worksheet</p>
           <h3>Statements</h3>
         </div>
-        <span className="section-pill">{statements.length} statements</span>
+        <span className="section-pill">
+          {displayGroups.length} cards / {statements.length} statements
+        </span>
       </div>
       <div className="statement-pill-row">
-        {statements.map((statement) => (
+        {displayGroups.map((group) => (
           <button
-            key={statement.id}
+            key={group.id}
             type="button"
-            className={`statement-pill ${activeIndex === statement.index ? "is-active" : ""}`}
-            onClick={() => selectStatementIndex(statement.index, selectionSignature)}
-            title={statement.title || `Statement ${statement.index + 1}`}
+            className={`statement-pill ${group.statementIndexes.includes(activeIndex) ? "is-active" : ""}`}
+            onClick={() => selectStatementIndex(group.primaryIndex, selectionSignature)}
+            title={group.title}
           >
-            #{statement.index + 1}
+            {group.shortLabel}
           </button>
         ))}
       </div>

@@ -115,6 +115,7 @@ export function computeGraphLayout(nodes: GraphNode[], edges: GraphEdge[]): Grap
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
   const indegree = new Map(nodes.map((node) => [node.id, 0]));
   const adjacency = new Map(nodes.map((node) => [node.id, [] as string[]]));
+  const incomingAdjacency = new Map(nodes.map((node) => [node.id, [] as string[]]));
   const levelMap = new Map(nodes.map((node) => [node.id, 0]));
 
   for (const edge of edges) {
@@ -124,6 +125,7 @@ export function computeGraphLayout(nodes: GraphNode[], edges: GraphEdge[]): Grap
 
     indegree.set(edge.target, (indegree.get(edge.target) || 0) + 1);
     adjacency.get(edge.source)?.push(edge.target);
+    incomingAdjacency.get(edge.target)?.push(edge.source);
   }
 
   const queue = nodes
@@ -162,6 +164,8 @@ export function computeGraphLayout(nodes: GraphNode[], edges: GraphEdge[]): Grap
     levelMap.set(node.id, fallbackLevel);
   }
 
+  applyAnchoredBranchLevels(levelMap, nodes, edges);
+
   const columns = new Map<number, GraphNode[]>();
 
   for (const node of nodes) {
@@ -182,6 +186,8 @@ export function computeGraphLayout(nodes: GraphNode[], edges: GraphEdge[]): Grap
       );
     });
   }
+
+  optimizeLevelOrdering(columns, sortedNumericKeys(columns), adjacency, incomingAdjacency);
 
   const positions = new Map<string, GraphPosition>();
   const sortedLevels = Array.from(columns.keys()).sort((left, right) => left - right);
@@ -216,11 +222,500 @@ export function computeGraphLayout(nodes: GraphNode[], edges: GraphEdge[]): Grap
     currentY += bandHeight + levelGap;
   }
 
+  applyJoinNeighborhoodLayout(positions, nodes, edges, columnGap);
+  applyStatementPrimaryInputLayout(positions, nodes, edges, columnGap);
+  resolveRowOverlaps(positions, Math.max(columnGap, 18));
+  normalizeLayoutBounds(positions, paddingX, paddingY);
+
+  let maxRight = 0;
+  let maxBottom = 0;
+
+  for (const position of positions.values()) {
+    maxRight = Math.max(maxRight, position.x + position.width);
+    maxBottom = Math.max(maxBottom, position.y + position.height);
+  }
+
   return {
     positions,
-    width: paddingX * 2 + maxRowWidth,
-    height: Math.max(currentY - levelGap + paddingY, paddingY * 2 + nodeHeight),
+    width: Math.max(paddingX + maxRight + paddingX, paddingX * 2 + maxRowWidth),
+    height: Math.max(maxBottom + paddingY, paddingY * 2 + nodeHeight),
   };
+}
+
+function applyAnchoredBranchLevels(
+  levelMap: Map<string, number>,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+) {
+  const incoming = new Map<string, GraphEdge[]>();
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+
+  for (const edge of edges) {
+    if (!incoming.has(edge.target)) {
+      incoming.set(edge.target, []);
+    }
+
+    incoming.get(edge.target)?.push(edge);
+  }
+
+  for (const joinNode of nodes.filter((node) => node.type === "join")) {
+    const joinLevel = levelMap.get(joinNode.id) || 0;
+    const joinInputs = (incoming.get(joinNode.id) || []).filter(
+      (edge) =>
+        edge.sourceRole === "join" && isJoinInputLayoutNode(nodeMap.get(edge.source)),
+    );
+
+    for (const joinInput of joinInputs) {
+      const depthMap = new Map<string, number>();
+      collectUpstreamBranchDepths(
+        joinInput.source,
+        0,
+        depthMap,
+        incoming,
+        nodeMap,
+      );
+
+      for (const [nodeId, depth] of depthMap.entries()) {
+        const desiredLevel = Math.max(0, joinLevel - 1 - depth);
+        levelMap.set(nodeId, Math.max(levelMap.get(nodeId) || 0, desiredLevel));
+      }
+    }
+  }
+}
+
+function collectUpstreamBranchDepths(
+  nodeId: string,
+  depth: number,
+  depthMap: Map<string, number>,
+  incoming: Map<string, GraphEdge[]>,
+  nodeMap: Map<string, GraphNode>,
+) {
+  const existingDepth = depthMap.get(nodeId);
+
+  if (typeof existingDepth === "number" && existingDepth >= depth) {
+    return;
+  }
+
+  depthMap.set(nodeId, depth);
+
+  for (const edge of incoming.get(nodeId) || []) {
+    if (!isJoinInputLayoutNode(nodeMap.get(edge.source))) {
+      continue;
+    }
+
+    collectUpstreamBranchDepths(edge.source, depth + 1, depthMap, incoming, nodeMap);
+  }
+}
+
+function applyJoinNeighborhoodLayout(
+  positions: Map<string, GraphPosition>,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  columnGap: number,
+) {
+  const incoming = new Map<string, GraphEdge[]>();
+  const outgoing = new Map<string, GraphEdge[]>();
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+
+  for (const edge of edges) {
+    if (!incoming.has(edge.target)) {
+      incoming.set(edge.target, []);
+    }
+
+    incoming.get(edge.target)?.push(edge);
+
+    if (!outgoing.has(edge.source)) {
+      outgoing.set(edge.source, []);
+    }
+
+    outgoing.get(edge.source)?.push(edge);
+  }
+
+  for (const joinNode of nodes.filter((node) => node.type === "join")) {
+    const joinPosition = positions.get(joinNode.id);
+
+    if (!joinPosition) {
+      continue;
+    }
+
+    const joinIncoming = (incoming.get(joinNode.id) || []).filter((edge) => positions.has(edge.source));
+
+    if (!joinIncoming.length) {
+      continue;
+    }
+
+    const primaryEdge =
+      joinIncoming.find((edge) => nodeMap.get(edge.source)?.type === "statement") ||
+      joinIncoming.find(
+        (edge) =>
+          normalizeSourceRole(edge.sourceRole) !== "join" &&
+          isJoinInputLayoutNode(nodeMap.get(edge.source)),
+      ) ||
+      null;
+    const primaryPosition = primaryEdge ? positions.get(primaryEdge.source) : null;
+
+    if (primaryEdge && primaryPosition) {
+      primaryPosition.x = joinPosition.x + (joinPosition.width - primaryPosition.width) / 2;
+      alignUniqueUpstreamChain(primaryEdge.source, positions, incoming, outgoing, nodeMap);
+    }
+
+    const sideEdges = joinIncoming
+      .filter(
+        (edge) =>
+          edge.id !== primaryEdge?.id &&
+          isJoinInputLayoutNode(nodeMap.get(edge.source)),
+      )
+      .sort((left, right) => compareNodeHorizontalCenter(positions, left.source, right.source));
+
+    if (!sideEdges.length) {
+      continue;
+    }
+
+    const leftCount = Math.floor(sideEdges.length / 2);
+    const rightCount = Math.ceil(sideEdges.length / 2);
+    const leftEdges = sideEdges.slice(0, leftCount);
+    const rightEdges = sideEdges.slice(sideEdges.length - rightCount);
+    const centerX = joinPosition.x + joinPosition.width / 2;
+    const sideWidths = sideEdges.map((edge) => positions.get(edge.source)?.width || joinPosition.width);
+    const widestSideWidth = Math.max(...sideWidths, joinPosition.width);
+    const firstLaneOffset = Math.max(Math.round(joinPosition.width * 0.42), 84);
+    const laneStep = widestSideWidth + Math.max(columnGap, 18);
+
+    leftEdges.forEach((edge, index) => {
+      const sourcePosition = positions.get(edge.source);
+
+      if (!sourcePosition) {
+        return;
+      }
+
+      const laneOffset = firstLaneOffset + (leftEdges.length - index - 1) * laneStep;
+      sourcePosition.x = centerX - laneOffset - sourcePosition.width / 2;
+      alignUniqueUpstreamChain(edge.source, positions, incoming, outgoing, nodeMap);
+    });
+
+    rightEdges.forEach((edge, index) => {
+      const sourcePosition = positions.get(edge.source);
+
+      if (!sourcePosition) {
+        return;
+      }
+
+      const laneOffset = firstLaneOffset + index * laneStep;
+      sourcePosition.x = centerX + laneOffset - sourcePosition.width / 2;
+      alignUniqueUpstreamChain(edge.source, positions, incoming, outgoing, nodeMap);
+    });
+  }
+}
+
+function applyStatementPrimaryInputLayout(
+  positions: Map<string, GraphPosition>,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  columnGap: number,
+) {
+  const incoming = new Map<string, GraphEdge[]>();
+  const outgoing = new Map<string, GraphEdge[]>();
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+
+  for (const edge of edges) {
+    if (!incoming.has(edge.target)) {
+      incoming.set(edge.target, []);
+    }
+    incoming.get(edge.target)?.push(edge);
+
+    if (!outgoing.has(edge.source)) {
+      outgoing.set(edge.source, []);
+    }
+    outgoing.get(edge.source)?.push(edge);
+  }
+
+  for (const statementNode of nodes.filter((node) => node.type === "statement")) {
+    const statementPosition = positions.get(statementNode.id);
+
+    if (!statementPosition) {
+      continue;
+    }
+
+    const primaryInputs = (incoming.get(statementNode.id) || [])
+      .filter(
+        (edge) =>
+          edge.sourceRole !== "join" && isJoinInputLayoutNode(nodeMap.get(edge.source)),
+      )
+      .sort((left, right) => compareNodeHorizontalCenter(positions, left.source, right.source));
+
+    if (!primaryInputs.length) {
+      continue;
+    }
+
+    const horizontalGap = Math.max(columnGap, 28);
+    const totalWidth =
+      primaryInputs.reduce((sum, edge) => {
+        const position = positions.get(edge.source);
+        return sum + (position?.width || 0);
+      }, 0) +
+      Math.max(primaryInputs.length - 1, 0) * horizontalGap;
+    let currentX =
+      statementPosition.x + (statementPosition.width - totalWidth) / 2;
+
+    for (const edge of primaryInputs) {
+      const sourcePosition = positions.get(edge.source);
+
+      if (!sourcePosition) {
+        continue;
+      }
+
+      sourcePosition.x = currentX;
+      currentX += sourcePosition.width + horizontalGap;
+      alignUniqueUpstreamChain(edge.source, positions, incoming, outgoing, nodeMap);
+    }
+  }
+}
+
+function alignUniqueUpstreamChain(
+  nodeId: string,
+  positions: Map<string, GraphPosition>,
+  incoming: Map<string, GraphEdge[]>,
+  outgoing: Map<string, GraphEdge[]>,
+  nodeMap: Map<string, GraphNode>,
+) {
+  const basePosition = positions.get(nodeId);
+
+  if (!basePosition) {
+    return;
+  }
+
+  let currentNodeId = nodeId;
+  let currentCenterX = basePosition.x + basePosition.width / 2;
+
+  while (true) {
+    const parentEdges = (incoming.get(currentNodeId) || []).filter((edge) =>
+      isJoinInputLayoutNode(nodeMap.get(edge.source)),
+    );
+
+    if (parentEdges.length !== 1) {
+      break;
+    }
+
+    const parentEdge = parentEdges[0];
+    const parentOutgoing = outgoing.get(parentEdge.source) || [];
+
+    if (parentOutgoing.length !== 1) {
+      break;
+    }
+
+    const parentPosition = positions.get(parentEdge.source);
+
+    if (!parentPosition) {
+      break;
+    }
+
+    parentPosition.x = currentCenterX - parentPosition.width / 2;
+    currentNodeId = parentEdge.source;
+    currentCenterX = parentPosition.x + parentPosition.width / 2;
+  }
+}
+
+function compareNodeHorizontalCenter(
+  positions: Map<string, GraphPosition>,
+  leftNodeId: string,
+  rightNodeId: string,
+) {
+  const leftPosition = positions.get(leftNodeId);
+  const rightPosition = positions.get(rightNodeId);
+  const leftCenter = leftPosition ? leftPosition.x + leftPosition.width / 2 : 0;
+  const rightCenter = rightPosition ? rightPosition.x + rightPosition.width / 2 : 0;
+  return leftCenter - rightCenter;
+}
+
+function resolveRowOverlaps(
+  positions: Map<string, GraphPosition>,
+  horizontalGap: number,
+) {
+  const rows = new Map<number, GraphPosition[]>();
+
+  for (const position of positions.values()) {
+    const rowKey = Math.round(position.y);
+    if (!rows.has(rowKey)) {
+      rows.set(rowKey, []);
+    }
+    rows.get(rowKey)?.push(position);
+  }
+
+  for (const rowPositions of rows.values()) {
+    if (rowPositions.length <= 1) {
+      continue;
+    }
+
+    rowPositions.sort((left, right) => left.x - right.x);
+
+    const originalLeft = Math.min(...rowPositions.map((position) => position.x));
+    const originalRight = Math.max(...rowPositions.map((position) => position.x + position.width));
+    const originalCenter = (originalLeft + originalRight) / 2;
+
+    let cursorX = rowPositions[0].x;
+    rowPositions[0].x = cursorX;
+
+    for (let index = 1; index < rowPositions.length; index += 1) {
+      const previous = rowPositions[index - 1];
+      const current = rowPositions[index];
+      cursorX = Math.max(current.x, previous.x + previous.width + horizontalGap);
+      current.x = cursorX;
+    }
+
+    const resolvedLeft = Math.min(...rowPositions.map((position) => position.x));
+    const resolvedRight = Math.max(...rowPositions.map((position) => position.x + position.width));
+    const resolvedCenter = (resolvedLeft + resolvedRight) / 2;
+    const shiftX = originalCenter - resolvedCenter;
+
+    if (!shiftX) {
+      continue;
+    }
+
+    for (const position of rowPositions) {
+      position.x += shiftX;
+    }
+  }
+}
+
+function isJoinInputLayoutNode(node: GraphNode | undefined) {
+  return [
+    "source_table",
+    "unnest_source",
+    "lateral_view",
+    "cte",
+    "inline_view",
+    "union_branch",
+    "scalar_subquery",
+    "exists_subquery",
+    "in_subquery",
+    "source_cluster",
+    "cte_cluster",
+  ].includes(String(node?.type || ""));
+}
+
+function normalizeLayoutBounds(
+  positions: Map<string, GraphPosition>,
+  paddingX: number,
+  paddingY: number,
+) {
+  if (!positions.size) {
+    return;
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+
+  for (const position of positions.values()) {
+    minX = Math.min(minX, position.x);
+    minY = Math.min(minY, position.y);
+  }
+
+  const shiftX = minX < paddingX ? paddingX - minX : 0;
+  const shiftY = minY < paddingY ? paddingY - minY : 0;
+
+  if (!shiftX && !shiftY) {
+    return;
+  }
+
+  for (const position of positions.values()) {
+    position.x += shiftX;
+    position.y += shiftY;
+  }
+}
+
+function optimizeLevelOrdering(
+  columns: Map<number, GraphNode[]>,
+  sortedLevels: number[],
+  outgoing: Map<string, string[]>,
+  incoming: Map<string, string[]>,
+) {
+  if (sortedLevels.length <= 1) {
+    return;
+  }
+
+  const initialRank = buildNodeRankMap(columns);
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    let orderIndex = buildNodeRankMap(columns);
+
+    for (let index = 1; index < sortedLevels.length; index += 1) {
+      reorderLevel(columns, sortedLevels[index], incoming, orderIndex, initialRank);
+      orderIndex = buildNodeRankMap(columns);
+    }
+
+    for (let index = sortedLevels.length - 2; index >= 0; index -= 1) {
+      reorderLevel(columns, sortedLevels[index], outgoing, orderIndex, initialRank);
+      orderIndex = buildNodeRankMap(columns);
+    }
+  }
+}
+
+function reorderLevel(
+  columns: Map<number, GraphNode[]>,
+  level: number,
+  neighborMap: Map<string, string[]>,
+  orderIndex: Map<string, number>,
+  initialRank: Map<string, number>,
+) {
+  const levelNodes = columns.get(level);
+
+  if (!levelNodes || levelNodes.length <= 1) {
+    return;
+  }
+
+  levelNodes.sort((left, right) => {
+    const leftCenter = computeNeighborBarycenter(left.id, neighborMap, orderIndex);
+    const rightCenter = computeNeighborBarycenter(right.id, neighborMap, orderIndex);
+
+    if (Number.isFinite(leftCenter) && Number.isFinite(rightCenter) && leftCenter !== rightCenter) {
+      return leftCenter - rightCenter;
+    }
+
+    if (Number.isFinite(leftCenter) !== Number.isFinite(rightCenter)) {
+      return Number.isFinite(leftCenter) ? -1 : 1;
+    }
+
+    const initialDelta = (initialRank.get(left.id) || 0) - (initialRank.get(right.id) || 0);
+
+    if (initialDelta !== 0) {
+      return initialDelta;
+    }
+
+    return String(left.label || left.id).localeCompare(String(right.label || right.id));
+  });
+}
+
+function computeNeighborBarycenter(
+  nodeId: string,
+  neighborMap: Map<string, string[]>,
+  orderIndex: Map<string, number>,
+) {
+  const neighbors = (neighborMap.get(nodeId) || []).filter((id) => orderIndex.has(id));
+
+  if (!neighbors.length) {
+    return Number.NaN;
+  }
+
+  const sum = neighbors.reduce((total, neighborId) => total + (orderIndex.get(neighborId) || 0), 0);
+  return sum / neighbors.length;
+}
+
+function buildNodeRankMap(columns: Map<number, GraphNode[]>) {
+  const orderIndex = new Map<string, number>();
+  const levels = sortedNumericKeys(columns);
+
+  for (const level of levels) {
+    const nodes = columns.get(level) || [];
+    nodes.forEach((node, index) => {
+      orderIndex.set(node.id, index);
+    });
+  }
+
+  return orderIndex;
+}
+
+function sortedNumericKeys(columns: Map<number, GraphNode[]>) {
+  return Array.from(columns.keys()).sort((left, right) => left - right);
 }
 
 export function buildGraphFocusState(
@@ -584,7 +1079,13 @@ export function computeFlowVisualContext(
   };
 }
 
-export function createEdgePath(source: GraphPosition, target: GraphPosition) {
+export function createEdgePath(
+  source: GraphPosition,
+  target: GraphPosition,
+  edge?: GraphEdge | null,
+  _sourceNode?: GraphNode | null,
+  targetNode?: GraphNode | null,
+) {
   if (
     source.x === target.x &&
     source.y === target.y &&
@@ -603,11 +1104,32 @@ export function createEdgePath(source: GraphPosition, target: GraphPosition) {
 
   const startX = source.x + source.width / 2;
   const startY = source.y + source.height;
-  const endX = target.x + target.width / 2;
-  const endY = target.y;
-  const curve = Math.max((endY - startY) / 2, 28);
+  const defaultEndX = target.x + target.width / 2;
+  const defaultEndY = target.y;
 
-  return `M ${startX} ${startY} C ${startX} ${startY + curve}, ${endX} ${endY - curve}, ${endX} ${endY}`;
+  if (targetNode?.type === "join") {
+    if (_sourceNode?.type === "statement" || normalizeSourceRole(edge?.sourceRole) !== "join") {
+      const endX = target.x + target.width / 2;
+      const endY = target.y;
+      const curve = Math.max((endY - startY) / 2, 28);
+
+      return `M ${startX} ${startY} C ${startX} ${startY + curve}, ${endX} ${endY - curve}, ${endX} ${endY}`;
+    }
+
+    const sourceCenterX = source.x + source.width / 2;
+    const targetCenterX = target.x + target.width / 2;
+    const attachRight = sourceCenterX >= targetCenterX;
+    const endX = attachRight ? target.x + target.width : target.x;
+    const endY = target.y + target.height / 2;
+    const controlY = Math.max(startY + 28, endY - 32);
+    const controlX = attachRight ? endX + 32 : endX - 32;
+
+    return `M ${startX} ${startY} C ${startX} ${controlY}, ${controlX} ${endY}, ${endX} ${endY}`;
+  }
+
+  const curve = Math.max((defaultEndY - startY) / 2, 28);
+
+  return `M ${startX} ${startY} C ${startX} ${startY + curve}, ${defaultEndX} ${defaultEndY - curve}, ${defaultEndX} ${defaultEndY}`;
 }
 
 export function graphMetaText(node: GraphNode) {
@@ -633,6 +1155,10 @@ export function graphMetaText(node: GraphNode) {
 
   if (node.type === "statement") {
     return "MAIN QUERY";
+  }
+
+  if (node.type === "directive") {
+    return "SESSION CONFIG";
   }
 
   if (node.type === "join") {
@@ -735,9 +1261,19 @@ export function graphMetaText(node: GraphNode) {
     const sourceCount = Number(node.meta?.sourceCount ?? 0);
     const clauseCount = Number(node.meta?.clauseCount ?? 0);
     const setOperator = String(node.meta?.setOperator || "").trim();
+    const branchCount = Number(node.meta?.branchCount ?? 0);
+    const branchIndex = Number(node.meta?.branchIndex ?? -1);
 
     if (node.type === "union_branch" && setOperator) {
+      if (branchCount > 1 && branchIndex >= 0) {
+        return `branch ${branchIndex + 1}/${branchCount} · ${sourceCount} source`;
+      }
+
       return `${sourceCount} source · ${setOperator}`;
+    }
+
+    if (setOperator && branchCount > 1) {
+      return `${branchCount} branches · ${setOperator}`;
     }
 
     return clauseCount > 0
@@ -787,6 +1323,10 @@ export function graphEyebrowText(node: GraphNode) {
 
   if (node.type === "statement") {
     return "QUERY";
+  }
+
+  if (node.type === "directive") {
+    return "DIRECTIVE";
   }
 
   if (
@@ -1368,6 +1908,7 @@ function nodeToneProfile(
       };
     case "statement":
     case "script_statement":
+    case "directive":
       return {
         baseRgb: blendRgb({ r: 255, g: 255, b: 255 }, paletteRoles.light, 0.12),
         fillTint: 0.22,
@@ -1455,6 +1996,10 @@ function fillBlendStrength(nodeType: string | undefined) {
     return 0.18;
   }
 
+  if (nodeType === "directive") {
+    return 0.16;
+  }
+
   return 0.22;
 }
 
@@ -1479,6 +2024,10 @@ function strokeBlendStrength(nodeType: string | undefined) {
     return 0.16;
   }
 
+  if (nodeType === "directive") {
+    return 0.14;
+  }
+
   return 0.2;
 }
 
@@ -1495,6 +2044,7 @@ function monochromeAccentForNode(nodeType: string | undefined) {
       return { r: 67, g: 124, b: 177 };
     case "statement":
     case "script_statement":
+    case "directive":
       return { r: 57, g: 112, b: 164 };
     case "result":
       return { r: 70, g: 136, b: 176 };
@@ -1524,6 +2074,7 @@ function baseTintStrength(nodeType: string | undefined) {
       return 0.16;
     case "statement":
     case "script_statement":
+    case "directive":
       return 0.1;
     case "result":
       return 0.14;
@@ -1564,6 +2115,7 @@ function accentDepthStrength(nodeType: string | undefined) {
       return 0.12;
     case "statement":
     case "script_statement":
+    case "directive":
       return 0.22;
     case "result":
       return 0.1;
@@ -1681,6 +2233,7 @@ function gradientStopOpacity(nodeType: string | undefined) {
       return 0.28;
     case "statement":
     case "script_statement":
+    case "directive":
       return 0.22;
     default:
       return 0.26;

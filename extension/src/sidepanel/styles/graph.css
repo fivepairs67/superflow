@@ -372,10 +372,25 @@
     radial-gradient(circle at 80% 10%, rgba(255, 164, 28, 0.08), transparent 18%),
     linear-gradient(180deg, rgba(252, 255, 255, 0.96), rgba(238, 246, 255, 0.94));
   cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.graph-canvas-shell,
+.graph-canvas-shell .graph-zoom-layer,
+.graph-canvas-shell .graph-svg-stage {
+  cursor: grab;
 }
 
 .graph-canvas-shell.is-dragging {
   cursor: grabbing;
+}
+
+.graph-canvas-shell.is-dragging,
+.graph-canvas-shell.is-dragging .graph-zoom-layer,
+.graph-canvas-shell.is-dragging .graph-svg-stage,
+.graph-canvas-shell.is-dragging .graph-svg-stage * {
+  cursor: grabbing !important;
 }
 
 .graph-zoom-layer {
@@ -398,6 +413,25 @@
   width: auto;
   height: auto;
   max-width: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.graph-svg-stage text,
+.graph-svg-stage tspan,
+.graph-node text,
+.graph-node tspan {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+  cursor: inherit;
+}
+
+.graph-node,
+.graph-node *,
+.graph-script-node,
+.graph-script-node * {
+  cursor: pointer;
 }
 
 .graph-edge {
@@ -653,6 +687,7 @@
 }
 
 .graph-node.type-statement .graph-node-body,
+.graph-node.type-directive .graph-node-body,
 .graph-node.type-script_statement .graph-node-body,
 .graph-node.type-result .graph-node-body {
   stroke-width: 1.85;
@@ -695,6 +730,7 @@
 }
 
 .graph-node.type-statement .graph-eyebrow,
+.graph-node.type-directive .graph-eyebrow,
 .graph-node.type-script_statement .graph-eyebrow,
 .graph-node.type-result .graph-eyebrow {
   letter-spacing: 0.1em;

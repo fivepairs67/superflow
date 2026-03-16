@@ -140,6 +140,309 @@
       ]
     },
     {
+      "file": "fixtures/sql/hive_airflow_union_view.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG"
+        ],
+        "graphNodeTypesInclude": [
+          "inline_view",
+          "union_branch",
+          "source_table",
+          "statement",
+          "result",
+          "write_target"
+        ],
+        "graphNodeLabelsInclude": [
+          "UNION ALL BRANCH 1",
+          "UNION ALL BRANCH 2"
+        ],
+        "graphNodeTypeCountsAtLeast": {
+          "union_branch": 2,
+          "source_table": 2
+        }
+      },
+      "statements": [
+        {
+          "index": 0,
+          "mode": "ast",
+          "writesInclude": [
+            "11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_PAGE_STP_LOG_${YYYYMMDD}"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/hive_airflow_templated_identifiers.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "sourceCountEquals": 1,
+        "sourceNamesInclude": [
+          "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG"
+        ],
+        "graphNodeTypesInclude": [
+          "source_table",
+          "statement",
+          "result",
+          "write_target"
+        ]
+      },
+      "statements": [
+        {
+          "index": 0,
+          "mode": "ast",
+          "sourceCountEquals": 1,
+          "sourceNamesInclude": [
+            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG"
+          ],
+          "writesInclude": [
+            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_CLIENT_LOG"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/hive_drop_temp_cleanup.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast-script",
+        "statementCount": 2
+      },
+      "statements": [
+        {
+          "index": 0,
+          "flowSequenceEquals": [
+            "DROP",
+            "WRITE"
+          ],
+          "writesInclude": [
+            "11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_CLIENT_LOG_${YYYYMMDD}"
+          ],
+          "graphNodeTypesInclude": [
+            "statement",
+            "write_target"
+          ],
+          "sourceCountEquals": 0
+        },
+        {
+          "index": 1,
+          "flowSequenceEquals": [
+            "DROP",
+            "WRITE"
+          ],
+          "writesInclude": [
+            "11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_PAGE_STP_LOG_${YYYYMMDD}"
+          ],
+          "graphNodeTypesInclude": [
+            "statement",
+            "write_target"
+          ],
+          "sourceCountEquals": 0
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/hive_commented_create_table.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "flowSequenceEquals": [
+          "CREATE",
+          "RESULT",
+          "WRITE"
+        ],
+        "graphNodeTypesInclude": [
+          "statement",
+          "result",
+          "write_target"
+        ],
+        "graphNodeLabelsInclude": [
+          "CREATE"
+        ]
+      },
+      "statements": [
+        {
+          "index": 0,
+          "mode": "ast",
+          "flowSequenceEquals": [
+            "CREATE",
+            "RESULT",
+            "WRITE"
+          ],
+          "writesInclude": [
+            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_PAGE_STP_LOG"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/hive_external_templated_table.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "flowSequenceEquals": [
+          "CREATE",
+          "RESULT",
+          "WRITE"
+        ],
+        "graphNodeTypesInclude": [
+          "statement",
+          "result",
+          "write_target"
+        ],
+        "graphNodeLabelsInclude": [
+          "CREATE"
+        ]
+      },
+      "statements": [
+        {
+          "index": 0,
+          "mode": "ast",
+          "flowSequenceEquals": [
+            "CREATE",
+            "RESULT",
+            "WRITE"
+          ],
+          "writesInclude": [
+            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_CLIENT_LOG"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/hive_set_prelude.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "mixed-script",
+        "statementCount": 3,
+        "activeStatementIndex": 2
+      },
+      "statements": [
+        {
+          "index": 0,
+          "mode": "heuristic",
+          "flowSequenceEquals": [
+            "SET"
+          ],
+          "graphNodeTypesInclude": [
+            "directive"
+          ]
+        },
+        {
+          "index": 1,
+          "mode": "heuristic",
+          "flowSequenceEquals": [
+            "SET"
+          ],
+          "graphNodeTypesInclude": [
+            "directive"
+          ]
+        },
+        {
+          "index": 2,
+          "sourceNamesInclude": [
+            "sales.daily_orders"
+          ],
+          "flowSequenceEquals": [
+            "SELECT",
+            "FILTER",
+            "GROUP BY",
+            "RESULT"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "fixtures/sql/hive_inline_union_view.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "flowSequenceEquals": [
+          "SELECT",
+          "RESULT",
+          "WRITE"
+        ],
+        "sourceNamesInclude": [
+          "demo.source_a"
+        ],
+        "graphNodeTypesInclude": [
+          "inline_view",
+          "source_table",
+          "statement",
+          "result",
+          "write_target"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/hive_nested_inline_aliases.sql",
+      "options": {
+        "dialectPreference": "hive"
+      },
+      "expect": {
+        "mode": "ast",
+        "statementCount": 1,
+        "parserDialect": "hive",
+        "parserEngine": "dt",
+        "sourceNamesInclude": [
+          "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG",
+          "ELEVENST.{{ params.table_prefix }}DIC_AD_REAL_LINK"
+        ],
+        "graphNodeTypesInclude": [
+          "inline_view",
+          "source_table",
+          "statement",
+          "result",
+          "write_target"
+        ],
+        "graphNodeLabelsInclude": [
+          "INLINE VIEW S",
+          "INLINE VIEW A",
+          "INLINE VIEW B",
+          "INLINE VIEW AD",
+          "INLINE VIEW X"
+        ]
+      },
+      "statements": [
+        {
+          "index": 0,
+          "flowSequenceEquals": [
+            "SELECT",
+            "RESULT",
+            "WRITE"
+          ]
+        }
+      ]
+    },
+    {
       "file": "fixtures/sql/postgres_subqueries.sql",
       "options": {
         "dialectPreference": "auto"
@@ -261,9 +564,19 @@
           "statement",
           "filter",
           "aggregate",
-          "result"
+          "result",
+          "write_target"
         ]
-      }
+      },
+      "statements": [
+        {
+          "index": 0,
+          "mode": "ast",
+          "writesInclude": [
+            "analytics.daily_sales"
+          ]
+        }
+      ]
     },
     {
       "file": "fixtures/sql/trino_ctas.sql",
@@ -282,8 +595,7 @@
           "WRITE"
         ],
         "sourceNamesInclude": [
-          "sales_events",
-          "base"
+          "sales_events"
         ],
         "graphNodeTypesInclude": [
           "source_table",

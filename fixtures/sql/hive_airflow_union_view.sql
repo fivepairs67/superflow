@@ -1,0 +1,14 @@
+CREATE TABLE 11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_PAGE_STP_LOG_${YYYYMMDD}
+AS
+SELECT X.LOG_SEQ
+FROM (
+    SELECT A.LOG_SEQ
+    FROM 11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG AS A
+    WHERE A.PART_DT = '${YYYYMMDD}'
+
+    UNION ALL
+
+    SELECT B.LOG_SEQ
+    FROM 11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG AS B
+    WHERE B.LOG_SEQ = '0'
+) AS X;

@@ -94,6 +94,15 @@ function assertAnalysis(analysis, expect, failures, label) {
   }
 
   if (
+    typeof expect.activeStatementIndex === "number" &&
+    analysis.activeStatementIndex !== expect.activeStatementIndex
+  ) {
+    failures.push(
+      `${label}: expected activeStatementIndex=${expect.activeStatementIndex}, received ${analysis.activeStatementIndex}`,
+    );
+  }
+
+  if (
     typeof expect.scriptDependencyCount === "number" &&
     (analysis.scriptDependencies || []).length !== expect.scriptDependencyCount
   ) {
@@ -144,6 +153,15 @@ function assertAnalysis(analysis, expect, failures, label) {
     );
   }
 
+  if (
+    typeof expect.sourceCountEquals === "number" &&
+    (analysis.sources || []).length !== expect.sourceCountEquals
+  ) {
+    failures.push(
+      `${label}: expected sourceCountEquals=${expect.sourceCountEquals}, received ${(analysis.sources || []).length}`,
+    );
+  }
+
   assertSourceNames(analysis.sources || [], expect.sourceNamesInclude || [], failures, label);
   assertSourceSampleKinds(
     analysis.sources || [],
@@ -182,6 +200,14 @@ function assertStatement(statement, expect, failures, label) {
   }
 
   assertSourceNames(statement.sources || [], expect.sourceNamesInclude || [], failures, label);
+  if (
+    typeof expect.sourceCountEquals === "number" &&
+    (statement.sources || []).length !== expect.sourceCountEquals
+  ) {
+    failures.push(
+      `${label}: expected sourceCountEquals=${expect.sourceCountEquals}, received ${(statement.sources || []).length}`,
+    );
+  }
   assertWrites(statement.writes || [], expect.writesInclude || [], failures, label);
   assertGraph(statement.graph, expect, failures, label);
 }
@@ -233,6 +259,18 @@ function assertGraph(graph, expect, failures, label) {
   for (const nodeLabel of expect.graphNodeLabelsInclude || []) {
     if (!nodes.some((node) => String(node.label || "") === nodeLabel)) {
       failures.push(`${label}: missing graph node label ${nodeLabel}`);
+    }
+  }
+
+  if (expect.graphNodeTypeCountsAtLeast && typeof expect.graphNodeTypeCountsAtLeast === "object") {
+    for (const [nodeType, minimumCount] of Object.entries(expect.graphNodeTypeCountsAtLeast)) {
+      const actualCount = nodes.filter((node) => String(node.type || "") === nodeType).length;
+
+      if (actualCount < Number(minimumCount || 0)) {
+        failures.push(
+          `${label}: expected graph node type ${nodeType} count >= ${minimumCount}, received ${actualCount}`,
+        );
+      }
     }
   }
 

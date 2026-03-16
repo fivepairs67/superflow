@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS 11ST.{{ params.table_prefix }}BASE_11ST_AUTO_CLIENT_LOG
+AS
+SELECT *
+FROM 11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG;

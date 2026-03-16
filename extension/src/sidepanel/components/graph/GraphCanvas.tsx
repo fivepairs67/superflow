@@ -18,7 +18,7 @@ import type {
 } from "../../../shared/types";
 import { NodeDetailPanel } from "./NodeDetailPanel";
 import { GraphToolbar } from "./GraphToolbar";
-import { ScriptView, buildScriptDependencyGraph } from "./ScriptView";
+import { ScriptView, buildScriptDependencyGraph, computeScriptViewLayout } from "./ScriptView";
 import { EdgeLegend } from "./EdgeLegend";
 import { useGraphStore } from "../../state/graph-store";
 import {
@@ -53,6 +53,14 @@ const MIN_ZOOM = 0.58;
 const MAX_ZOOM = 1.8;
 const ZOOM_STEP = 0.14;
 
+function clearNativeTextSelection() {
+  try {
+    window.getSelection()?.removeAllRanges();
+  } catch (_error) {
+    // Ignore selection APIs that are unavailable in the current surface.
+  }
+}
+
 export function GraphCanvas({
   analysis,
   statement,
@@ -80,6 +88,7 @@ export function GraphCanvas({
   } = useGraphStore();
   const [zoom, setZoom] = useState(1);
   const [compactMode, setCompactMode] = useState(false);
+  const [scriptFocusedNodeId, setScriptFocusedNodeId] = useState<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const lastSqlSelectionRef = useRef("");
   const ignoredSelectionSignatureRef = useRef("");
@@ -108,7 +117,7 @@ export function GraphCanvas({
     [logicalEdges, logicalNodes],
   );
   const scriptLayout = useMemo(
-    () => computeGraphLayout(scriptGraph.nodes, scriptGraph.edges),
+    () => computeScriptViewLayout(scriptGraph.nodes, scriptGraph.edges),
     [scriptGraph.edges, scriptGraph.nodes],
   );
   const selectedColumn = useMemo<GraphColumn | null>(
@@ -167,6 +176,30 @@ export function GraphCanvas({
       setViewMode("logical");
     }
   }, [hasScriptView, setViewMode, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "logical" || !scriptFocusedNodeId) {
+      return;
+    }
+
+    function handleMouseBackButton(event: MouseEvent) {
+      if (event.button !== 3) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      handleReturnToScript();
+    }
+
+    window.addEventListener("mouseup", handleMouseBackButton, true);
+    window.addEventListener("auxclick", handleMouseBackButton, true);
+
+    return () => {
+      window.removeEventListener("mouseup", handleMouseBackButton, true);
+      window.removeEventListener("auxclick", handleMouseBackButton, true);
+    };
+  }, [scriptFocusedNodeId, viewMode]);
 
   useEffect(() => {
     const selectionSignature = buildSelectionSignature(
@@ -350,11 +383,14 @@ export function GraphCanvas({
         <ScriptView
           analysis={analysis}
           zoom={zoom}
-          editorSelectionSignature={editorSelectionSignature}
           viewportRef={viewportRef}
           onViewportPointerDown={handleViewportPointerDown}
           onViewportPointerMove={handleViewportPointerMove}
           onViewportPointerUp={handleViewportPointerUp}
+          focusedNodeId={scriptFocusedNodeId}
+          onFocusNode={setScriptFocusedNodeId}
+          onOpenLogicalFromNode={handleScriptNodeOpenLogical}
+          onBackgroundClick={handleScriptBackgroundClick}
         />
       ) : logicalNodes.length ? (
         <>
@@ -377,14 +413,14 @@ export function GraphCanvas({
               ))}
             </div>
             <div className="graph-action-row">
-              {controlsCollapsed && hasScriptView ? (
-                <button className="graph-reset-button" type="button" onClick={() => setViewMode("script")}>
-                  Script View
+              {scriptFocusedNodeId ? (
+                <button className="graph-reset-button" type="button" onClick={handleReturnToScript}>
+                  Back to Script
                 </button>
               ) : null}
-              {selectedNodeId ? (
-                <button className="graph-reset-button" type="button" onClick={handleManualFocusReset}>
-                  Focus Reset
+              {controlsCollapsed && hasScriptView && !scriptFocusedNodeId ? (
+                <button className="graph-reset-button" type="button" onClick={() => setViewMode("script")}>
+                  Script View
                 </button>
               ) : null}
             </div>
@@ -454,8 +490,10 @@ export function GraphCanvas({
                 {logicalEdges.map((edge) => {
                   const source = logicalLayout.positions.get(edge.source);
                   const target = logicalLayout.positions.get(edge.target);
+                  const sourceNode = logicalNodes.find((node) => node.id === edge.source) || null;
+                  const targetNode = logicalNodes.find((node) => node.id === edge.target) || null;
 
-                  if (!source || !target) {
+                  if (!source || !target || !sourceNode || !targetNode) {
                     return null;
                   }
 
@@ -469,7 +507,7 @@ export function GraphCanvas({
                       key={edge.id}
                       className={`${edgeClassName(edge.type, focusState.edgeState.get(edge.id))}${edge.source === edge.target ? " graph-edge--self" : ""}`}
                       markerEnd="url(#react-graph-arrow)"
-                      d={createEdgePath(source, target)}
+                      d={createEdgePath(source, target, edge, sourceNode, targetNode)}
                       style={edgeStyle}
                     />
                   );
@@ -606,7 +644,17 @@ export function GraphCanvas({
     handleManualFocusReset();
   }
 
+  function handleScriptBackgroundClick() {
+    if (suppressBackgroundResetRef.current) {
+      return;
+    }
+
+    clearNativeTextSelection();
+    setScriptFocusedNodeId(null);
+  }
+
   function handleManualFocusReset() {
+    clearNativeTextSelection();
     ignoredSelectionSignatureRef.current = buildSelectionSignature(
       sqlSelectionText,
       sqlSelectionStart,
@@ -615,7 +663,23 @@ export function GraphCanvas({
     clearSelection();
   }
 
+  function handleScriptNodeOpenLogical(nodeId: string, statementIndex: number) {
+    setScriptFocusedNodeId(nodeId);
+    ignoredSelectionSignatureRef.current = buildSelectionSignature(
+      sqlSelectionText,
+      sqlSelectionStart,
+      sqlSelectionEnd,
+    );
+    selectStatementIndex(statementIndex, editorSelectionSignature);
+    setViewMode("logical");
+  }
+
+  function handleReturnToScript() {
+    setViewMode("script");
+  }
+
   function handlePanelNodeSelect(nodeId: string) {
+    clearNativeTextSelection();
     ignoredSelectionSignatureRef.current = buildSelectionSignature(
       sqlSelectionText,
       sqlSelectionStart,
@@ -685,8 +749,13 @@ function GraphNodeGroup({
       tabIndex={0}
       aria-label={`Select ${node.label || node.id}`}
       style={style}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        clearNativeTextSelection();
+      }}
       onClick={(event) => {
         event.stopPropagation();
+        (event.currentTarget as Element & { blur?: () => void }).blur?.();
         onSelect(node.id);
       }}
       onKeyDown={(event) => {
@@ -737,9 +806,22 @@ function GraphNodeGroup({
       <text className="graph-eyebrow" x={position.x + 14} y={position.y + 20}>
         {graphEyebrowText(node)}
       </text>
-      <text className="graph-label" x={position.x + 14} y={position.y + 38}>
+      <text
+        className="graph-label"
+        x={position.x + 14}
+        y={position.y + 38}
+        style={
+          display.labelScale !== 1
+            ? { fontSize: `calc(var(--graph-label-size, 12px) * ${display.labelScale})` }
+            : undefined
+        }
+      >
         {display.labelLines.map((line, index) => (
-          <tspan key={`${node.id}:label:${index}`} x={position.x + 14} dy={index === 0 ? 0 : 13}>
+          <tspan
+            key={`${node.id}:label:${index}`}
+            x={position.x + 14}
+            dy={index === 0 ? 0 : display.labelLineGap}
+          >
             {line}
           </tspan>
         ))}
@@ -747,7 +829,18 @@ function GraphNodeGroup({
       <text
         className="graph-meta"
         x={position.x + 14}
-        y={position.y + (display.labelLines.length > 1 ? 68 : 56)}
+        y={
+          position.y +
+          Math.min(
+            position.height - 8,
+            56 + Math.max(display.labelLines.length - 1, 0) * Math.max(display.labelLineGap - 3, 10),
+          )
+        }
+        style={
+          display.metaScale !== 1
+            ? { fontSize: `calc(var(--graph-meta-size, 10px) * ${display.metaScale})` }
+            : undefined
+        }
       >
         {display.meta}
       </text>
@@ -886,21 +979,34 @@ function buildSelectionSignature(
 function buildNodeDisplay(node: GraphNode) {
   if (node.type === "source_table") {
     const qualified = splitQualifiedLabel(node.label || node.id);
+    const labelLines = wrapNodeLabel(qualified.objectName, 26, 3);
     return {
-      labelLines: wrapNodeLabel(qualified.objectName, 18, 2),
+      labelLines,
       meta: qualified.namespace || graphMetaText(node),
+      ...buildAdaptiveLabelMetrics(labelLines, node.type),
     };
   }
 
+  if (node.type === "write_target") {
+    const qualified = splitQualifiedLabel(node.label || node.id);
+    const labelLines = wrapNodeLabel(qualified.objectName, 26, 3);
+    return {
+      labelLines,
+      meta: buildQualifiedMeta(qualified.namespace, graphMetaText(node)),
+      ...buildAdaptiveLabelMetrics(labelLines, node.type),
+    };
+  }
+
+  const labelLines = wrapNodeLabel(node.label || node.id, 18, 2);
   return {
-    labelLines: wrapNodeLabel(node.label || node.id, 18, 2),
+    labelLines,
     meta: graphMetaText(node),
+    ...buildAdaptiveLabelMetrics(labelLines, node.type),
   };
 }
 
 function splitQualifiedLabel(value: string) {
-  const parts = String(value || "")
-    .split(".")
+  const parts = splitQualifiedIdentifierParts(value)
     .map((part) => part.trim())
     .filter(Boolean);
 
@@ -924,10 +1030,7 @@ function wrapNodeLabel(value: string, maxLineLength: number, maxLines: number) {
     return ["-"];
   }
 
-  const tokens = raw
-    .split(/(?<=[._-])/)
-    .filter(Boolean)
-    .flatMap((token) => splitOversizedToken(token, maxLineLength));
+  const tokens = tokenizeNodeLabel(raw, maxLineLength);
   const lines: string[] = [];
   let currentLine = "";
 
@@ -989,6 +1092,137 @@ function splitOversizedToken(token: string, maxLength: number) {
   return chunks;
 }
 
+function splitQualifiedIdentifierParts(value: string) {
+  const input = String(value || "");
+  const parts: string[] = [];
+  let current = "";
+  let index = 0;
+
+  while (index < input.length) {
+    const templateToken = readTemplateToken(input, index);
+
+    if (templateToken) {
+      current += templateToken.value;
+      index = templateToken.nextIndex;
+      continue;
+    }
+
+    const quotedToken = readQuotedToken(input, index);
+
+    if (quotedToken) {
+      current += quotedToken.value;
+      index = quotedToken.nextIndex;
+      continue;
+    }
+
+    const char = input[index];
+
+    if (char === ".") {
+      if (current.trim()) {
+        parts.push(current);
+      }
+      current = "";
+      index += 1;
+      continue;
+    }
+
+    current += char;
+    index += 1;
+  }
+
+  if (current.trim()) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
+function tokenizeNodeLabel(value: string, maxLineLength: number) {
+  const input = String(value || "");
+  const tokens: string[] = [];
+  let current = "";
+  let index = 0;
+
+  while (index < input.length) {
+    const templateToken = readTemplateToken(input, index);
+
+    if (templateToken) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      tokens.push(templateToken.value);
+      index = templateToken.nextIndex;
+      continue;
+    }
+
+    const quotedToken = readQuotedToken(input, index);
+
+    if (quotedToken) {
+      current += quotedToken.value;
+      index = quotedToken.nextIndex;
+      continue;
+    }
+
+    const char = input[index];
+    current += char;
+    index += 1;
+
+    if (char === "." || char === "_" || char === "-") {
+      tokens.push(current);
+      current = "";
+    }
+  }
+
+  if (current) {
+    tokens.push(current);
+  }
+
+  return tokens.filter(Boolean).flatMap((token) => splitOversizedToken(token, maxLineLength));
+}
+
+function readTemplateToken(value: string, index: number) {
+  const slice = value.slice(index);
+  const templateMatch =
+    /^(?:\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\$\{[\s\S]*?\})/.exec(slice);
+
+  if (!templateMatch?.[0]) {
+    return null;
+  }
+
+  return {
+    value: templateMatch[0],
+    nextIndex: index + templateMatch[0].length,
+  };
+}
+
+function readQuotedToken(value: string, index: number) {
+  const char = value[index];
+
+  if (char !== '"' && char !== "'" && char !== "`" && char !== "[") {
+    return null;
+  }
+
+  const closingChar = char === "[" ? "]" : char;
+  let cursor = index + 1;
+
+  while (cursor < value.length) {
+    if (value[cursor] === closingChar) {
+      return {
+        value: value.slice(index, cursor + 1),
+        nextIndex: cursor + 1,
+      };
+    }
+
+    cursor += 1;
+  }
+
+  return {
+    value: value.slice(index),
+    nextIndex: value.length,
+  };
+}
+
 function truncateMiddle(value: string, maxLength: number) {
   const input = String(value || "");
 
@@ -999,6 +1233,49 @@ function truncateMiddle(value: string, maxLength: number) {
   const head = Math.ceil((maxLength - 1) / 2);
   const tail = Math.floor((maxLength - 1) / 2);
   return `${input.slice(0, head)}…${input.slice(input.length - tail)}`;
+}
+
+function buildQualifiedMeta(namespace: string, baseMeta: string) {
+  const trimmedNamespace = String(namespace || "").trim();
+  const trimmedMeta = String(baseMeta || "").trim();
+
+  if (trimmedNamespace && trimmedMeta) {
+    return `${truncateMiddle(trimmedNamespace, 16)} · ${trimmedMeta}`;
+  }
+
+  return trimmedNamespace || trimmedMeta;
+}
+
+function buildAdaptiveLabelMetrics(labelLines: string[], nodeType: string | undefined) {
+  const longestLine = Math.max(
+    0,
+    ...labelLines.map((line) => String(line || "").trim().length),
+  );
+  let labelScale = 1;
+
+  if (nodeType === "source_table" || nodeType === "write_target" || nodeType === "cte") {
+    if (longestLine >= 26) {
+      labelScale = 0.82;
+    } else if (longestLine >= 24) {
+      labelScale = 0.86;
+    } else if (longestLine >= 22) {
+      labelScale = 0.9;
+    } else if (longestLine >= 20) {
+      labelScale = 0.94;
+    }
+
+    if (labelLines.length >= 3) {
+      labelScale = Math.min(labelScale, 0.9);
+    }
+  } else if (labelLines.length >= 2 && longestLine >= 16) {
+    labelScale = 0.95;
+  }
+
+  return {
+    labelScale,
+    metaScale: labelScale < 0.9 ? 0.94 : 1,
+    labelLineGap: labelScale < 0.88 ? 12 : 13,
+  };
 }
 
 function fitViewport(
@@ -1038,11 +1315,11 @@ function buildLogicalDisplayGraph(
   preservedNodeId: string | null = null,
 ): QueryGraph {
   if (!graph?.nodes?.length || !compactMode) {
-    return graph || { nodes: [], edges: [], columns: [] };
+    return rerouteJoinClauseInputs(expandNestedSubqueryJoins(graph || { nodes: [], edges: [], columns: [] }));
   }
 
   const preservedNodeIds = new Set<string>(preservedNodeId ? [preservedNodeId] : []);
-  let nextGraph = graph;
+  let nextGraph = rerouteJoinClauseInputs(expandNestedSubqueryJoins(graph));
 
   const clauseNodes = nextGraph.nodes.filter((node) => isClauseNode(node.type));
 
@@ -1092,6 +1369,148 @@ function buildLogicalDisplayGraph(
   nextGraph = foldSiblingSourceNodes(nextGraph, preservedNodeIds);
 
   return nextGraph;
+}
+
+function rerouteJoinClauseInputs(graph: QueryGraph): QueryGraph {
+  if (!graph?.nodes?.length || !graph?.edges?.length) {
+    return graph;
+  }
+
+  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
+  const statementNode = graph.nodes.find((node) => node.type === "statement");
+  const joinNode = graph.nodes.find((node) => node.type === "join");
+
+  if (!statementNode || !joinNode) {
+    return graph;
+  }
+
+  let changed = false;
+  const edges = graph.edges.map((edge) => {
+    if (
+      edge.target === statementNode.id &&
+      edge.sourceRole === "join" &&
+      edge.source !== joinNode.id &&
+      isJoinInputCandidateNode(nodeMap.get(edge.source)?.type)
+    ) {
+      changed = true;
+      return {
+        ...edge,
+        target: joinNode.id,
+        id: `${edge.id}:join-target`,
+      };
+    }
+
+    return edge;
+  });
+
+  return changed
+    ? {
+        nodes: graph.nodes,
+        edges: dedupeEdges(edges),
+        columns: graph.columns || [],
+      }
+    : graph;
+}
+
+function expandNestedSubqueryJoins(graph: QueryGraph): QueryGraph {
+  if (!graph?.nodes?.length || !graph?.edges?.length) {
+    return graph;
+  }
+
+  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
+  const incoming = buildEdgeIndex(graph.edges, "target");
+  const extraNodes: GraphNode[] = [];
+  const replacementEdges: QueryGraph["edges"] = [];
+  const reroutedEdgeIds = new Set<string>();
+  let changed = false;
+
+  for (const node of graph.nodes) {
+    if (!["inline_view", "cte"].includes(String(node.type || ""))) {
+      continue;
+    }
+
+    const joinTypes = Array.isArray(node.meta?.joinTypes)
+      ? node.meta.joinTypes.filter(Boolean).map((value) => String(value))
+      : [];
+    const candidateEdges = (incoming.get(node.id) || []).filter((edge) =>
+      isJoinInputCandidateNode(nodeMap.get(edge.source)?.type),
+    );
+    const joinEdges = candidateEdges.filter((edge) => normalizeJoinEdgeRole(edge.sourceRole) === "join");
+    const primaryEdges = candidateEdges.filter((edge) => normalizeJoinEdgeRole(edge.sourceRole) !== "join");
+
+    if (!joinEdges.length || !primaryEdges.length) {
+      continue;
+    }
+
+    const joinNodeId = `${node.id}:nested-join`;
+    const nestedRanges = mergeGraphSpans([
+      ...getNodeSpans(node),
+      ...primaryEdges.flatMap((edge) => getNodeSpans(nodeMap.get(edge.source) || null)),
+      ...joinEdges.flatMap((edge) => getNodeSpans(nodeMap.get(edge.source) || null)),
+    ]);
+
+    extraNodes.push({
+      id: joinNodeId,
+      type: "join",
+      label: buildJoinLabel(joinTypes),
+      meta: {
+        joinTypes,
+        nestedFor: node.id,
+        nestedJoin: true,
+        rangeStart: nestedRanges[0]?.start ?? null,
+        rangeEnd: nestedRanges[0]?.end ?? null,
+        ranges: nestedRanges,
+      },
+    });
+
+    for (const edge of [...primaryEdges, ...joinEdges]) {
+      reroutedEdgeIds.add(edge.id);
+      replacementEdges.push({
+        ...edge,
+        id: `${edge.id}:nested-join`,
+        target: joinNodeId,
+      });
+    }
+
+    replacementEdges.push({
+      id: `edge:${joinNodeId}->${node.id}:nested-join-output`,
+      source: joinNodeId,
+      target: node.id,
+      type: "subquery_for",
+      sourceRole: "from",
+    });
+
+    changed = true;
+  }
+
+  if (!changed) {
+    return graph;
+  }
+
+  return {
+    nodes: [...graph.nodes, ...extraNodes],
+    edges: dedupeEdges([
+      ...graph.edges.filter((edge) => !reroutedEdgeIds.has(edge.id)),
+      ...replacementEdges,
+    ]),
+    columns: graph.columns || [],
+  };
+}
+
+function isJoinInputCandidateNode(type: string | undefined) {
+  return [
+    "source_table",
+    "unnest_source",
+    "lateral_view",
+    "cte",
+    "inline_view",
+    "union_branch",
+    "scalar_subquery",
+    "exists_subquery",
+    "in_subquery",
+    "source_cluster",
+    "cte_cluster",
+  ].includes(String(type || ""));
 }
 
 function isClauseNode(type: string | undefined) {
@@ -1328,10 +1747,35 @@ function dedupeEdges(
       source: edge.source,
       target: edge.target,
       type: edge.type,
+      sourceRole: edge.sourceRole,
     });
   }
 
   return deduped;
+}
+
+function normalizeJoinEdgeRole(sourceRole: string | undefined) {
+  const value = String(sourceRole || "").trim().toLowerCase();
+
+  if (!value) {
+    return "from";
+  }
+
+  if (value === "join" || value === "using" || value.includes("join")) {
+    return "join";
+  }
+
+  return "from";
+}
+
+function buildJoinLabel(joinTypes: string[]) {
+  const uniqueJoinTypes = Array.from(new Set(joinTypes.filter(Boolean).map((value) => String(value).trim().toUpperCase())));
+
+  if (!uniqueJoinTypes.length) {
+    return "JOIN";
+  }
+
+  return uniqueJoinTypes.length === 1 ? `${uniqueJoinTypes[0]} JOIN` : "MULTI JOIN";
 }
 
 function normalizeMatchToken(value: string) {
@@ -1474,18 +1918,29 @@ function findBestSelectionNode(
     return null;
   }
 
-  const exact = findNodeByExactToken(nodes, token);
+  const exactMatches = findNodesByExactToken(nodes, token);
+  const exactContainingMatch = localSelection
+    ? findNarrowestContainingNode(
+        exactMatches,
+        localSelection.start,
+        localSelection.end,
+      )
+    : null;
+  const exact = exactContainingMatch || exactMatches[0] || null;
+  const rangedMatch = localSelection
+    ? findNarrowestNodeByRange(nodes, localSelection.start, localSelection.end)
+    : null;
 
-  if (exact && exact.type !== "statement" && exact.type !== "result") {
-    return exact;
+  if (
+    exactContainingMatch &&
+    exactContainingMatch.type !== "statement" &&
+    exactContainingMatch.type !== "result"
+  ) {
+    return exactContainingMatch;
   }
 
-  if (localSelection) {
-    const rangedMatch = findNarrowestNodeByRange(nodes, localSelection.start, localSelection.end);
-
-    if (rangedMatch) {
-      return rangedMatch;
-    }
+  if (rangedMatch) {
+    return rangedMatch;
   }
 
   if (exact) {
@@ -1493,7 +1948,13 @@ function findBestSelectionNode(
   }
 
   const qualifier = token.includes(".") ? normalizeMatchToken(token.split(".")[0]) : "";
-  const qualifierMatch = qualifier ? findNodeByExactToken(nodes, qualifier) : null;
+  const qualifierMatches = qualifier ? findNodesByExactToken(nodes, qualifier) : [];
+  const qualifierMatch =
+    (localSelection
+      ? findNarrowestContainingNode(qualifierMatches, localSelection.start, localSelection.end)
+      : null) ||
+    qualifierMatches[0] ||
+    null;
 
   if (qualifierMatch) {
     return qualifierMatch;
@@ -1505,25 +1966,67 @@ function findBestSelectionNode(
     return scopeNode;
   }
 
-  return nodes.find((node) => node.type === "statement") || null;
+  return nodes.find((node) => node.type === "statement" || node.type === "directive") || null;
 }
 
-function findNodeByExactToken(nodes: GraphNode[], token: string) {
+function findNodesByExactToken(nodes: GraphNode[], token: string) {
   if (!token) {
-    return null;
+    return [];
   }
 
-  return (
-    nodes.find((node) => {
+  return nodes.filter((node) => {
       const candidates = [
         normalizeMatchToken(node.label || ""),
         normalizeMatchToken(node.id || ""),
         normalizeMatchToken((node.label || "").split(".").pop() || ""),
+        normalizeMatchToken(String(node.meta?.alias || "")),
       ].filter(Boolean);
 
       return candidates.includes(token);
-    }) || null
+  });
+}
+
+function findNarrowestContainingNode(
+  nodes: GraphNode[],
+  selectionStart: number,
+  selectionEnd: number,
+) {
+  return (
+    nodes
+      .map((node) => ({
+        node,
+        spans: getNodeSpans(node),
+      }))
+      .flatMap(({ node, spans }) =>
+        spans
+          .filter((span) => spanContainsSelection(span, selectionStart, selectionEnd))
+          .map((span) => ({
+            node,
+            width: span.end - span.start,
+          })),
+      )
+      .sort((left, right) => {
+        const widthDelta = left.width - right.width;
+
+        if (widthDelta !== 0) {
+          return widthDelta;
+        }
+
+        return nodeSelectionPriority(left.node) - nodeSelectionPriority(right.node);
+      })[0]?.node || null
   );
+}
+
+function spanContainsSelection(
+  span: { start: number; end: number },
+  selectionStart: number,
+  selectionEnd: number,
+) {
+  if (selectionStart === selectionEnd) {
+    return selectionStart >= span.start && selectionStart <= span.end;
+  }
+
+  return selectionStart >= span.start && selectionEnd <= span.end;
 }
 
 function findContainingScopeNode(
@@ -1581,7 +2084,7 @@ function findContainingScopeNode(
     return nodes.find((node) => node.type === "cte" && normalizeMatchToken(node.label || "") === normalizeMatchToken(cte.name)) || null;
   }
 
-  return nodes.find((node) => node.type === "statement") || null;
+  return nodes.find((node) => node.type === "statement" || node.type === "directive") || null;
 }
 
 function resolveLocalSelectionRange(
@@ -1617,6 +2120,24 @@ function resolveLocalSelectionRange(
 
 function mergeGraphSpans(spans: Array<{ start: number; end: number }>) {
   return normalizeGraphSpans(spans);
+}
+
+function nodeSelectionPriority(node: GraphNode) {
+  const type = String(node.type || "");
+
+  if (type === "statement" || type === "result") {
+    return 3;
+  }
+
+  if (type === "clause_stack" || type === "source_cluster" || type === "cte_cluster") {
+    return 2;
+  }
+
+  if (type.endsWith("_subquery") || type === "inline_view" || type === "union_branch") {
+    return 1;
+  }
+
+  return 0;
 }
 
 function findStatementBySelectionRange(

@@ -245,6 +245,8 @@ function formatNodeType(node: GraphNode) {
       return "LATERAL VIEW";
     case "statement":
       return "QUERY";
+    case "directive":
+      return "DIRECTIVE";
     case "result":
       return "RESULT";
     case "write_target":
