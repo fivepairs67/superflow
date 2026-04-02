@@ -74,7 +74,7 @@ Superset SQL Lab Page
 ## 4. 권장 디렉터리 구조
 
 ```text
-superset_query_visualizer/
+superflow/
 ├── README.md
 ├── TASKS.md
 ├── docs/

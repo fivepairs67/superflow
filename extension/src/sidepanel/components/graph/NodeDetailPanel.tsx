@@ -321,8 +321,12 @@ function CteFlowSection({ node }: { node: GraphNode }) {
     return null;
   }
 
+  const joinLabel = buildJoinFlowLabel(node);
   const flowSequence = Array.isArray(node.meta?.flowSequence)
-    ? node.meta.flowSequence.map((value) => String(value || "").trim()).filter(Boolean)
+    ? node.meta.flowSequence
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .map((step) => (String(step).toUpperCase() === "JOIN" && joinLabel ? joinLabel : step))
     : [];
 
   if (!flowSequence.length) {
@@ -344,6 +348,36 @@ function CteFlowSection({ node }: { node: GraphNode }) {
       </div>
     </section>
   );
+}
+
+function buildJoinFlowLabel(node: GraphNode) {
+  const uniqueJoinTypes = Array.from(
+    new Set(
+      (Array.isArray(node.meta?.joinTypes) ? node.meta.joinTypes : [])
+        .map((value) => normalizeJoinTypeToken(String(value)))
+        .filter(Boolean),
+    ),
+  );
+
+  if (!uniqueJoinTypes.length) {
+    return "";
+  }
+
+  return uniqueJoinTypes.length === 1 ? `${uniqueJoinTypes[0]} JOIN` : "MULTI JOIN";
+}
+
+function normalizeJoinTypeToken(value: string) {
+  const normalized = String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "JOIN" || normalized === "USING") {
+    return normalized;
+  }
+
+  return normalized.replace(/\s+JOIN$/i, "").trim() || "JOIN";
 }
 
 interface ColumnSectionProps {

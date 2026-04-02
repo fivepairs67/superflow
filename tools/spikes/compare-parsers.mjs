@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { build } from "esbuild";
 import nodeSqlParser from "node-sql-parser";
@@ -10,7 +10,8 @@ import { analyzeSql } from "../../extension/sql-analysis.js";
 
 const { Parser } = nodeSqlParser;
 const NODE_AST_PARSER = new Parser();
-const PROJECT_ROOT = "/home/fivepairs/DEV/superset_query_visualizer";
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "../..");
 const FIXTURE_DIR = path.join(PROJECT_ROOT, "fixtures/sql");
 const DT_RUNNER_ENTRY = path.join(PROJECT_ROOT, "tools/spikes/dt-sql-parser-runner.ts");
 

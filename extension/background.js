@@ -423,13 +423,28 @@ async function ensureTabObserverInjected(tabId) {
       return;
     }
 
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["content.js"],
-    });
+    await ensurePageBridgeInjected(tabId);
+    await ensureContentObserverInjected(tabId);
   } catch (error) {
     console.debug("Unable to inject content script into tab", error);
   }
+}
+
+async function ensureContentObserverInjected(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["content.js"],
+    injectImmediately: true,
+  });
+}
+
+async function ensurePageBridgeInjected(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["page-bridge.js"],
+    world: "MAIN",
+    injectImmediately: true,
+  });
 }
 
 async function waitForTabSession(tabId, timeoutMs) {

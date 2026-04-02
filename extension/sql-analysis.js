@@ -216,11 +216,13 @@ function inferDialectFromSql(sql) {
     { regex: /`[^`]+`/g, weight: 2, label: "backtick-ident" },
   ]);
   addDialectSignals(input, score, signals, "trino-like", [
+    { regex: /\btry\s*\(/g, weight: 5, label: "try" },
     { regex: /\bcount_if\s*\(/g, weight: 5, label: "count_if" },
     { regex: /\bapprox_percentile\s*\(/g, weight: 5, label: "approx_percentile" },
     { regex: /\btry_cast\s*\(/g, weight: 5, label: "try_cast" },
     { regex: /\bunnest\s*\(/g, weight: 4, label: "unnest" },
     { regex: /\bdate_add\s*\(\s*'/g, weight: 4, label: "date_add" },
+    { regex: /\bdate_parse\s*\(/g, weight: 4, label: "date_parse" },
     { regex: /\bdate_diff\s*\(\s*'/g, weight: 4, label: "date_diff" },
     { regex: /\bregexp_like\s*\(/g, weight: 4, label: "regexp_like" },
     { regex: /\bat\s+time\s+zone\b/g, weight: 3, label: "at-time-zone" },
@@ -288,7 +290,7 @@ function parserCandidatesForDetected(detectedDialect) {
     case "hive":
       return ["hive", "trino", "postgresql"];
     case "trino-like":
-      return ["hive", "trino", "postgresql"];
+      return ["trino", "hive", "postgresql"];
     case "oracle-like":
       return ["postgresql", "hive"];
     case "postgresql":
@@ -451,8 +453,8 @@ function analyzeStatement(statementInput, index, dialectContext) {
       : heuristicStatementSources;
   const heuristicJoinTypes = extractJoinTypes(cteInfo.mainStatement || logicalSql);
   const statementJoins = astInfo
-    ? Array.from(new Set([...(astInfo.statementJoins || []), ...heuristicJoinTypes]))
-    : heuristicJoinTypes;
+    ? normalizeJoinTypes([...(astInfo.statementJoins || []), ...heuristicJoinTypes])
+    : normalizeJoinTypes(heuristicJoinTypes);
   const clauses =
     astInfo?.clauses || detectClauses(cteInfo.mainStatement || logicalSql, statementJoins);
   const ctes = astInfo ? mergeCteAnalysis(cteInfo.ctes, heuristicCtes) : heuristicCtes;
@@ -1175,7 +1177,7 @@ function extractAstAllSources(ast) {
 function extractAstJoinTypes(ast) {
   const joinTypes = [];
   collectAstJoinTypes(ast, joinTypes);
-  return Array.from(new Set(joinTypes.filter(Boolean)));
+  return normalizeJoinTypes(joinTypes);
 }
 
 function collectAstSourcesDeep(node, sources, seen) {
@@ -1268,7 +1270,7 @@ function collectAstJoinTypes(node, joinTypes) {
     }
 
     for (const entry of group.entries) {
-      const joinType = String(entry?.join || "").trim().toUpperCase();
+      const joinType = normalizeJoinTypeToken(entry?.join);
 
       if (joinType) {
         joinTypes.push(joinType);
@@ -4904,6 +4906,7 @@ function buildGraph({
       meta: {
         sourceCount: cte.sourceCount,
         dependencyCount: cte.dependencies.length,
+        joinTypes: Array.isArray(cte.joinTypes) ? cte.joinTypes.filter(Boolean) : [],
         recursive: Boolean(cte.recursive),
         rangeStart: cte.rangeStart ?? cte.bodyRangeStart ?? null,
         rangeEnd: cte.rangeEnd ?? cte.bodyRangeEnd ?? null,
@@ -5622,7 +5625,7 @@ function detectMergeBranchActionKind(sql) {
 }
 
 function buildJoinClauseLabel(joinTypes) {
-  const uniqueJoinTypes = Array.from(new Set((joinTypes || []).map((value) => String(value || "").trim().toUpperCase()).filter(Boolean)));
+  const uniqueJoinTypes = normalizeJoinTypes(joinTypes);
 
   if (!uniqueJoinTypes.length) {
     return "JOIN";
@@ -5633,6 +5636,26 @@ function buildJoinClauseLabel(joinTypes) {
   }
 
   return "MULTI JOIN";
+}
+
+function normalizeJoinTypes(joinTypes) {
+  return Array.from(
+    new Set((joinTypes || []).map((value) => normalizeJoinTypeToken(value)).filter(Boolean)),
+  );
+}
+
+function normalizeJoinTypeToken(value) {
+  const normalized = String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "JOIN" || normalized === "USING") {
+    return normalized;
+  }
+
+  return normalized.replace(/\s+JOIN$/i, "").trim() || "JOIN";
 }
 
 function normalizeEdgeSourceRole(sourceType) {
@@ -5933,7 +5956,33 @@ function startsWithWord(sql, index, word) {
 
 function readIdentifier(sql, index) {
   const start = skipWhitespace(sql, index);
-  const char = sql[start];
+  const firstPart = readIdentifierPart(sql, start);
+
+  if (!firstPart) {
+    return null;
+  }
+
+  let cursor = firstPart.nextIndex;
+
+  while (sql[cursor] === ".") {
+    const nextPart = readIdentifierPart(sql, cursor + 1);
+
+    if (!nextPart) {
+      break;
+    }
+
+    cursor = nextPart.nextIndex;
+  }
+
+  return {
+    startIndex: start,
+    value: sql.slice(start, cursor),
+    nextIndex: cursor,
+  };
+}
+
+function readIdentifierPart(sql, index) {
+  const char = sql[index];
 
   if (!char) {
     return null;
@@ -5941,31 +5990,47 @@ function readIdentifier(sql, index) {
 
   if (char === '"' || char === "`" || char === "[") {
     const closing = char === "[" ? "]" : char;
-    const end = sql.indexOf(closing, start + 1);
+    let cursor = index + 1;
 
-    if (end === -1) {
-      return null;
+    while (cursor < sql.length) {
+      if (sql[cursor] !== closing) {
+        cursor += 1;
+        continue;
+      }
+
+      if (
+        (closing === '"' || closing === "`") &&
+        sql[cursor + 1] === closing
+      ) {
+        cursor += 2;
+        continue;
+      }
+
+      if (closing === "]" && sql[cursor + 1] === "]") {
+        cursor += 2;
+        continue;
+      }
+
+      return {
+        startIndex: index,
+        value: sql.slice(index, cursor + 1),
+        nextIndex: cursor + 1,
+      };
     }
 
-    return {
-      startIndex: start,
-      value: sql.slice(start, end + 1),
-      nextIndex: end + 1,
-    };
+    return null;
   }
 
-  const match = new RegExp(
-    `^(?:${IDENTIFIER_ATOM_PATTERN})(?:\\.(?:${IDENTIFIER_ATOM_PATTERN}))*`,
-  ).exec(sql.slice(start));
+  const match = new RegExp(`^(?:${IDENTIFIER_ATOM_PATTERN})`).exec(sql.slice(index));
 
   if (!match) {
     return null;
   }
 
   return {
-    startIndex: start,
+    startIndex: index,
     value: match[0],
-    nextIndex: start + match[0].length,
+    nextIndex: index + match[0].length,
   };
 }
 

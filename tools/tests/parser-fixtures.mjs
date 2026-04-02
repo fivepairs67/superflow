@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { analyzeSql } from "../../extension/sql-analysis.js";
 
-const PROJECT_ROOT = "/home/fivepairs/DEV/superset_query_visualizer";
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "../..");
 const SPEC_PATH = path.join(PROJECT_ROOT, "fixtures/parser-fixtures.json");
 
 async function main() {

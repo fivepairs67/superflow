@@ -4,6 +4,49 @@
   const SQL_COLLECT_INTERVAL_MS = 1000;
   const MAX_RESPONSE_TEXT_LENGTH = 100000;
   const EDITOR_HIGHLIGHT_CLASS = "sqv-editor-highlight";
+  const DOM_SQL_SNAPSHOT_SELECTORS = [
+    "textarea",
+    ".cm-content",
+    ".cm-editor",
+    ".CodeMirror",
+    ".CodeMirror-code",
+    ".monaco-editor textarea",
+    ".monaco-editor .view-lines",
+    "[contenteditable='plaintext-only']",
+    "[contenteditable='true'][role='textbox']",
+    "[contenteditable='true']",
+    "[role='code']",
+    "pre code",
+  ];
+  const STRUCTURED_CODE_CONTAINER_SELECTORS = [
+    "[data-testid*='code-view']",
+    "[data-testid*='source-view']",
+    "[data-testid*='file-content']",
+    "[data-testid*='diff-view']",
+    "[data-qa*='code-view']",
+    "[data-qa*='source-view']",
+    "[data-qa*='file-content']",
+    "[data-qa*='diff-view']",
+    "[class*='code-view']",
+    "[class*='CodeView']",
+    "[class*='source-view']",
+    "[class*='SourceView']",
+    "[class*='file-content']",
+    "[class*='FileContent']",
+    "[class*='react-code']",
+    "[class*='blob-code']",
+    "[class*='diff-view']",
+    "[class*='DiffView']",
+  ];
+  const STRUCTURED_CODE_LINE_SELECTORS = [
+    "[data-testid*='code-line']",
+    "[data-qa*='code-line']",
+    "[data-testid*='source-line']",
+    "[data-qa*='source-line']",
+    ".react-code-text",
+    ".blob-code-inner",
+    ".diff-line-pre",
+  ];
   let lastSqlSignature = "";
   let activeAceMarkers = [];
   let hasHighlightStyles = false;
@@ -268,6 +311,9 @@
     if (candidate.source.startsWith("bridge:textarea")) {
       score += 700;
     }
+    if (candidate.source.startsWith("bridge:structured-code")) {
+      score += 1200;
+    }
     if (typeof candidate.selectionStart === "number" || typeof candidate.selectionEnd === "number") {
       score += 600;
     }
@@ -317,6 +363,90 @@
 
   function readDomSelectedText() {
     return normalizeSelectedText(window.getSelection?.()?.toString() || "");
+  }
+
+  function queryAllBySelector(selector) {
+    const directMatches = Array.from(document.querySelectorAll(selector));
+
+    if (directMatches.length) {
+      return directMatches;
+    }
+
+    const shadowRoots = collectOpenShadowRoots();
+
+    if (!shadowRoots.length) {
+      return [];
+    }
+
+    return queryAllBySelectorInRoots(shadowRoots, selector);
+  }
+
+  function queryAllBySelectors(selectors) {
+    const matches = [];
+    const seen = new Set();
+
+    for (const selector of selectors) {
+      for (const element of queryAllBySelector(selector)) {
+        pushUniqueElement(matches, seen, element);
+      }
+    }
+
+    return matches;
+  }
+
+  function collectOpenShadowRoots() {
+    const roots = [];
+    const seen = new Set();
+    const stack = [];
+
+    if (document.documentElement) {
+      stack.push(document.documentElement);
+    }
+
+    while (stack.length) {
+      const current = stack.pop();
+
+      if (!(current instanceof Element)) {
+        continue;
+      }
+
+      if (current.shadowRoot && !seen.has(current.shadowRoot)) {
+        seen.add(current.shadowRoot);
+        roots.push(current.shadowRoot);
+
+        for (const nestedElement of current.shadowRoot.querySelectorAll("*")) {
+          stack.push(nestedElement);
+        }
+      }
+
+      for (const child of current.children || []) {
+        stack.push(child);
+      }
+    }
+
+    return roots;
+  }
+
+  function queryAllBySelectorInRoots(roots, selector) {
+    const matches = [];
+    const seen = new Set();
+
+    for (const root of roots) {
+      for (const element of root.querySelectorAll(selector)) {
+        pushUniqueElement(matches, seen, element);
+      }
+    }
+
+    return matches;
+  }
+
+  function pushUniqueElement(list, seen, element) {
+    if (!(element instanceof Element) || seen.has(element)) {
+      return;
+    }
+
+    seen.add(element);
+    list.push(element);
   }
 
   function positionToOffset(sql, row, column) {
@@ -436,7 +566,7 @@
       return editors;
     }
 
-    for (const editorRoot of document.querySelectorAll(".ace_editor")) {
+    for (const editorRoot of queryAllBySelector(".ace_editor")) {
       try {
         const editor = window.ace.edit(editorRoot);
         const sql = normalizeSql(editor?.getValue?.());
@@ -604,7 +734,7 @@
     const candidates = [];
 
     if (window.ace?.edit) {
-      for (const editorRoot of document.querySelectorAll(".ace_editor")) {
+      for (const editorRoot of queryAllBySelector(".ace_editor")) {
         try {
           const editor = window.ace.edit(editorRoot);
           const sql = normalizeSql(editor?.getValue?.());
@@ -629,7 +759,7 @@
       }
     }
 
-    for (const editorRoot of document.querySelectorAll(".ace_editor")) {
+    for (const editorRoot of queryAllBySelector(".ace_editor")) {
       const lines = Array.from(editorRoot.querySelectorAll(".ace_line"))
         .map((line) => normalizeSql(line.textContent || ""))
         .filter(Boolean);
@@ -680,7 +810,7 @@
       }
     }
 
-    for (const element of document.querySelectorAll("textarea, .cm-content, .cm-editor, .CodeMirror, .CodeMirror-code, .monaco-editor textarea, .monaco-editor .view-lines, [contenteditable='plaintext-only'], [contenteditable='true'][role='textbox'], [contenteditable='true'], [role='code'], pre code")) {
+    for (const element of queryAllBySelectors(DOM_SQL_SNAPSHOT_SELECTORS)) {
       const value =
         typeof element.value === "string"
           ? element.value
@@ -703,6 +833,10 @@
         isVisible: isElementVisible(element),
         isFocused: isElementFocused(element),
       });
+    }
+
+    if (!candidates.some((candidate) => SQL_KEYWORD_REGEX.test(candidate.sql))) {
+      candidates.push(...collectStructuredCodeSnapshots());
     }
 
     if (!candidates.length) {
@@ -749,6 +883,174 @@
     }
 
     return element.tagName.toLowerCase();
+  }
+
+  function collectStructuredCodeSnapshots() {
+    const containers = [];
+    const seen = new Set();
+
+    for (const selector of STRUCTURED_CODE_CONTAINER_SELECTORS) {
+      for (const element of queryAllBySelector(selector)) {
+        pushUniqueElement(containers, seen, element);
+      }
+    }
+
+    if (!containers.length) {
+      for (const selector of ["table", "[role='table']", "ol"]) {
+        for (const element of queryAllBySelector(selector)) {
+          if (looksLikeStructuredCodeContainer(element)) {
+            pushUniqueElement(containers, seen, element);
+          }
+        }
+      }
+    }
+
+    return containers
+      .map((container) => {
+        const sql = normalizeSql(extractStructuredCodeText(container));
+
+        if (!isLikelyStructuredSql(sql)) {
+          return null;
+        }
+
+        return {
+          sql,
+          source: describeStructuredCodeSource(container),
+          selectedText: readDomSelectedText(),
+          selectionStart: null,
+          selectionEnd: null,
+          isVisible: isElementVisible(container),
+          isFocused: isElementFocused(container),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function looksLikeStructuredCodeContainer(element) {
+    if (!(element instanceof Element)) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+
+    if (rect.width < 180 || rect.height < 60) {
+      return false;
+    }
+
+    const descriptor = [
+      element.id,
+      element.className,
+      element.getAttribute("data-testid"),
+      element.getAttribute("data-qa"),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return (
+      /code|source|diff|file/.test(descriptor) ||
+      Boolean(element.querySelector("code, pre, .react-code-text, .blob-code-inner, .diff-line-pre"))
+    );
+  }
+
+  function extractStructuredCodeText(container) {
+    const preferredLines = collectStructuredLineTexts(container, STRUCTURED_CODE_LINE_SELECTORS);
+
+    if (preferredLines.length >= 3) {
+      return preferredLines.join("\n");
+    }
+
+    const rowLines = collectStructuredRowTexts(container);
+
+    if (rowLines.length >= 3) {
+      return rowLines.join("\n");
+    }
+
+    return "";
+  }
+
+  function collectStructuredLineTexts(container, selectors) {
+    const lines = [];
+    const seen = new Set();
+
+    for (const selector of selectors) {
+      for (const element of container.querySelectorAll(selector)) {
+        if (seen.has(element)) {
+          continue;
+        }
+
+        seen.add(element);
+        const text = normalizeStructuredLineText(element.textContent || "");
+
+        if (text) {
+          lines.push(text);
+        }
+      }
+    }
+
+    return lines;
+  }
+
+  function collectStructuredRowTexts(container) {
+    const lines = [];
+
+    for (const row of container.querySelectorAll("tr, [role='row'], li")) {
+      const codeCell =
+        row.querySelector(
+          ".react-code-text, .blob-code-inner, .diff-line-pre, code, pre, td:last-child, [role='cell']:last-child",
+        ) || row;
+      const text = normalizeStructuredLineText(codeCell.textContent || "");
+
+      if (text) {
+        lines.push(text);
+      }
+    }
+
+    return lines;
+  }
+
+  function normalizeStructuredLineText(text) {
+    return String(text || "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\u00a0/g, " ")
+      .split("\n")
+      .map((line) => line.replace(/\s+$/g, ""))
+      .join("\n")
+      .trim();
+  }
+
+  function isLikelyStructuredSql(sql) {
+    if (!sql || sql.length < 24) {
+      return false;
+    }
+
+    const lineCount = sql.split("\n").filter(Boolean).length;
+    return lineCount >= 3 && SQL_KEYWORD_REGEX.test(sql);
+  }
+
+  function describeStructuredCodeSource(element) {
+    const descriptor = [
+      element.getAttribute("data-testid"),
+      element.getAttribute("data-qa"),
+      element.className,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    if (descriptor.includes("diff")) {
+      return "bridge:structured-code:diff";
+    }
+
+    if (descriptor.includes("source")) {
+      return "bridge:structured-code:source";
+    }
+
+    if (descriptor.includes("file")) {
+      return "bridge:structured-code:file";
+    }
+
+    return "bridge:structured-code";
   }
 
   function emitSqlSnapshotIfChanged() {

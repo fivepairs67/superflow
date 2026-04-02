@@ -997,6 +997,15 @@ function buildNodeDisplay(node: GraphNode) {
     };
   }
 
+  if (node.type === "cte") {
+    const labelLines = wrapNodeLabel(node.label || node.id, 24, 3);
+    return {
+      labelLines,
+      meta: graphMetaText(node),
+      ...buildAdaptiveLabelMetrics(labelLines, node.type),
+    };
+  }
+
   const labelLines = wrapNodeLabel(node.label || node.id, 18, 2);
   return {
     labelLines,
@@ -1040,17 +1049,13 @@ function wrapNodeLabel(value: string, maxLineLength: number, maxLines: number) {
       continue;
     }
 
-    if ((currentLine + token).length <= maxLineLength) {
+    if ((currentLine + token).length <= maxLineLength || lines.length === maxLines - 1) {
       currentLine += token;
       continue;
     }
 
     lines.push(currentLine);
     currentLine = token;
-
-    if (lines.length === maxLines - 1) {
-      break;
-    }
   }
 
   if (lines.length < maxLines && currentLine) {
@@ -1769,13 +1774,34 @@ function normalizeJoinEdgeRole(sourceRole: string | undefined) {
 }
 
 function buildJoinLabel(joinTypes: string[]) {
-  const uniqueJoinTypes = Array.from(new Set(joinTypes.filter(Boolean).map((value) => String(value).trim().toUpperCase())));
+  const uniqueJoinTypes = Array.from(
+    new Set(
+      joinTypes
+        .filter(Boolean)
+        .map((value) => normalizeJoinTypeToken(String(value)))
+        .filter(Boolean),
+    ),
+  );
 
   if (!uniqueJoinTypes.length) {
     return "JOIN";
   }
 
   return uniqueJoinTypes.length === 1 ? `${uniqueJoinTypes[0]} JOIN` : "MULTI JOIN";
+}
+
+function normalizeJoinTypeToken(value: string) {
+  const normalized = String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "JOIN" || normalized === "USING") {
+    return normalized;
+  }
+
+  return normalized.replace(/\s+JOIN$/i, "").trim() || "JOIN";
 }
 
 function normalizeMatchToken(value: string) {

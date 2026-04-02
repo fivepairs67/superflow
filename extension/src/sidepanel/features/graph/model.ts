@@ -1163,7 +1163,14 @@ export function graphMetaText(node: GraphNode) {
 
   if (node.type === "join") {
     const joinTypes = Array.isArray(node.meta?.joinTypes)
-      ? node.meta.joinTypes.filter(Boolean).map((value) => String(value))
+      ? Array.from(
+          new Set(
+            node.meta.joinTypes
+              .filter(Boolean)
+              .map((value) => normalizeJoinTypeToken(String(value)))
+              .filter(Boolean),
+          ),
+        )
       : [];
 
     if (!joinTypes.length) {
@@ -1294,6 +1301,20 @@ export function graphMetaText(node: GraphNode) {
   }
 
   return String(node.type || "node").replace(/_/g, " ").toUpperCase();
+}
+
+function normalizeJoinTypeToken(value: string) {
+  const normalized = String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "JOIN" || normalized === "USING") {
+    return normalized;
+  }
+
+  return normalized.replace(/\s+JOIN$/i, "").trim() || "JOIN";
 }
 
 export function graphEyebrowText(node: GraphNode) {

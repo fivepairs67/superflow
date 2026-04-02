@@ -524,6 +524,44 @@
       }
     },
     {
+      "file": "fixtures/sql/trino_quoted_schema_source.sql",
+      "options": {
+        "dialectPreference": "trino"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "parserDialect": "trino",
+        "parserEngine": "dt",
+        "sourceCountEquals": 1,
+        "sourceNamesInclude": [
+          "\"11ST\".BASE_11ST_AUTO_CLIENT_LOG"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/sql/trino_auto_join.sql",
+      "options": {
+        "dialectPreference": "auto"
+      },
+      "expect": {
+        "mode": "ast",
+        "detectedDialect": "trino-like",
+        "statementCount": 1,
+        "parserDialect": "trino",
+        "parserEngine": "dt",
+        "sourceCountEquals": 2,
+        "sourceNamesInclude": [
+          "\"11ST\".BASE_11ST_AUTO_CLIENT_LOG",
+          "dim_users"
+        ],
+        "graphNodeLabelsInclude": [
+          "LEFT JOIN"
+        ]
+      }
+    },
+    {
       "file": "fixtures/sql/hive_lateral_view.sql",
       "options": {
         "dialectPreference": "auto"
