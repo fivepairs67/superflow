@@ -5,7 +5,7 @@ Highlights:
 - Better bridge injection for web-based editors using Chrome MAIN-world execution
 - Better fallback extraction from structured code views and open shadow roots
 - Better Bitbucket source capture for SQL file views via raw-source fallback
-- Better parsing for quoted identifiers such as `"11ST".BASE_11ST_AUTO_CLIENT_LOG`
+- Better parsing for quoted identifiers such as `"APPDATA".BASE_APP_CLIENT_LOG`
 - Better auto-detection for Trino-like SQL using functions such as `TRY(...)` and `date_parse(...)`
 - More accurate join labeling to avoid false `MULTI JOIN` results in auto mode
 - Better CTE node rendering for long names in the Logical Graph

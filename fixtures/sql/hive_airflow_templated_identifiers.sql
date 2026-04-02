@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS 11ST.{{ params.table_prefix }}BASE_11ST_AUTO_CLIENT_LOG
+CREATE TABLE IF NOT EXISTS APPDATA.{{ params.table_prefix }}BASE_APP_CLIENT_LOG
 AS
 SELECT *
-FROM 11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG;
+FROM APPDATA.{{ params.table_prefix }}BASE_APP_MID_LOG;

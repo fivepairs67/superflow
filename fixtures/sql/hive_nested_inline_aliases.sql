@@ -1,4 +1,4 @@
-CREATE TABLE 11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_CLIENT_LOG_${YYYYMMDD}
+CREATE TABLE APPDATA.{{ params.table_prefix }}TMP_BASE_APP_CLIENT_LOG_${YYYYMMDD}
 AS
 SELECT X.*
 FROM (
@@ -28,7 +28,7 @@ FROM (
                                  ),
                                  ''
                                ) AS TMP_LINK_URL
-                        FROM 11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG
+                        FROM APPDATA.{{ params.table_prefix }}BASE_APP_MID_LOG
                         WHERE PART_DT = '${YYYYMMDD}'
                   ) AS S
             ) AS A
@@ -39,7 +39,7 @@ FROM (
             CREATIVE_ID,
             CLICK_ID,
             ADS_URL
-        FROM ELEVENST.{{ params.table_prefix }}DIC_AD_REAL_LINK
+        FROM DIMDATA.{{ params.table_prefix }}DIM_AD_LINK_MAP
         WHERE PART_DT = '20260107'
       ) AS AD
       ON B.ADS_ID = AD.ADS_ID

@@ -150,7 +150,7 @@
         "parserDialect": "hive",
         "parserEngine": "dt",
         "sourceNamesInclude": [
-          "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG"
+          "APPDATA.{{ params.table_prefix }}BASE_APP_MID_LOG"
         ],
         "graphNodeTypesInclude": [
           "inline_view",
@@ -174,7 +174,7 @@
           "index": 0,
           "mode": "ast",
           "writesInclude": [
-            "11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_PAGE_STP_LOG_${YYYYMMDD}"
+            "APPDATA.{{ params.table_prefix }}TMP_BASE_APP_PAGE_STEP_LOG_${YYYYMMDD}"
           ]
         }
       ]
@@ -189,7 +189,7 @@
         "statementCount": 1,
         "sourceCountEquals": 1,
         "sourceNamesInclude": [
-          "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG"
+          "APPDATA.{{ params.table_prefix }}BASE_APP_MID_LOG"
         ],
         "graphNodeTypesInclude": [
           "source_table",
@@ -204,10 +204,10 @@
           "mode": "ast",
           "sourceCountEquals": 1,
           "sourceNamesInclude": [
-            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG"
+            "APPDATA.{{ params.table_prefix }}BASE_APP_MID_LOG"
           ],
           "writesInclude": [
-            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_CLIENT_LOG"
+            "APPDATA.{{ params.table_prefix }}BASE_APP_CLIENT_LOG"
           ]
         }
       ]
@@ -229,7 +229,7 @@
             "WRITE"
           ],
           "writesInclude": [
-            "11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_CLIENT_LOG_${YYYYMMDD}"
+            "APPDATA.{{ params.table_prefix }}TMP_BASE_APP_CLIENT_LOG_${YYYYMMDD}"
           ],
           "graphNodeTypesInclude": [
             "statement",
@@ -244,7 +244,7 @@
             "WRITE"
           ],
           "writesInclude": [
-            "11ST.{{ params.table_prefix }}TMP_BASE_11ST_AUTO_PAGE_STP_LOG_${YYYYMMDD}"
+            "APPDATA.{{ params.table_prefix }}TMP_BASE_APP_PAGE_STEP_LOG_${YYYYMMDD}"
           ],
           "graphNodeTypesInclude": [
             "statement",
@@ -263,7 +263,7 @@
         "mode": "ast",
         "statementCount": 1,
         "parserDialect": "hive",
-        "parserEngine": "dt",
+        "parserEngine": "node",
         "flowSequenceEquals": [
           "CREATE",
           "RESULT",
@@ -288,7 +288,7 @@
             "WRITE"
           ],
           "writesInclude": [
-            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_PAGE_STP_LOG"
+            "APPDATA.{{ params.table_prefix }}BASE_APP_PAGE_STEP_LOG"
           ]
         }
       ]
@@ -302,7 +302,7 @@
         "mode": "ast",
         "statementCount": 1,
         "parserDialect": "hive",
-        "parserEngine": "dt",
+        "parserEngine": "node",
         "flowSequenceEquals": [
           "CREATE",
           "RESULT",
@@ -327,7 +327,7 @@
             "WRITE"
           ],
           "writesInclude": [
-            "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_CLIENT_LOG"
+            "APPDATA.{{ params.table_prefix }}BASE_APP_CLIENT_LOG"
           ]
         }
       ]
@@ -413,8 +413,8 @@
         "parserDialect": "hive",
         "parserEngine": "dt",
         "sourceNamesInclude": [
-          "11ST.{{ params.table_prefix }}BASE_11ST_AUTO_MID_LOG",
-          "ELEVENST.{{ params.table_prefix }}DIC_AD_REAL_LINK"
+          "APPDATA.{{ params.table_prefix }}BASE_APP_MID_LOG",
+          "DIMDATA.{{ params.table_prefix }}DIM_AD_LINK_MAP"
         ],
         "graphNodeTypesInclude": [
           "inline_view",
@@ -536,7 +536,7 @@
         "parserEngine": "dt",
         "sourceCountEquals": 1,
         "sourceNamesInclude": [
-          "\"11ST\".BASE_11ST_AUTO_CLIENT_LOG"
+          "\"APPDATA\".BASE_APP_CLIENT_LOG"
         ]
       }
     },
@@ -553,7 +553,7 @@
         "parserEngine": "dt",
         "sourceCountEquals": 2,
         "sourceNamesInclude": [
-          "\"11ST\".BASE_11ST_AUTO_CLIENT_LOG",
+          "\"APPDATA\".BASE_APP_CLIENT_LOG",
           "dim_users"
         ],
         "graphNodeLabelsInclude": [
