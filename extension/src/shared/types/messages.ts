@@ -23,6 +23,7 @@ export interface TabSessionUpdatedMessage {
 export interface ApplyEditorHighlightMessage {
   type: "APPLY_EDITOR_HIGHLIGHT";
   ranges: AnalysisRange[];
+  sql: string;
 }
 
 export interface SetAnalysisDialectMessage {

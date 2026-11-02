@@ -53,6 +53,9 @@ Recommended release posture:
 - [ ] `npm run typecheck`
 - [ ] `npm run build:extension`
 - [ ] `npm run test:parser-fixtures`
+- [ ] `npm run test:runtime`
+- [ ] `npm run test:release`
+- [ ] `npm run build:release` creates both GitHub and store ZIPs with matching versions
 - [ ] `dist/extension` loads cleanly in Chrome developer mode
 - [ ] Extension icon and manifest metadata render correctly in Chrome
 
@@ -68,6 +71,14 @@ Recommended release posture:
   - schema panel toggle works
 - [ ] Clipboard mode works
 - [ ] Paste mode works
+- [ ] Selecting a nested JOIN highlights its own query block in SQL Snapshot, including Auto mode and repeated sources
+- [ ] CTE/inline-view parent connections and nested JOINs remain intact in compact mode
+- [ ] Opening SuperFLOW in one tab does not open panels in other tabs or Chrome windows
+- [ ] The actual Chrome toolbar button opens the panel on the first click after an extension reload, including in a newly created tab (an extension-page test button is not sufficient)
+- [ ] Each explicitly opened panel retains its own SQL when another window is focused
+- [ ] Paste request failure keeps the input visible and shows an error
+- [ ] Disabling site access clears page SQL while preserving manually pasted SQL
+- [ ] After reloading the extension, reload the test pages before checking page integration
 - [ ] At least 5 real-world SQL samples were checked manually
 
 ## 7. Repository Hygiene
@@ -94,6 +105,8 @@ Suggested beta note:
 ## 9. Before Web Store Submission
 
 These are not required for GitHub publishing, but should be tracked separately.
+
+Use [the store submission guide](./store/SUBMISSION.md) for ready-to-use listing copy, permission explanations, and reviewer steps. Build completion, upload, review submission, and publication are separate states; do not mark publication complete just because the ZIP was built.
 
 - [ ] Finalize Chrome Web Store screenshots and listing copy
 - [ ] Verify privacy policy public URL

@@ -92,7 +92,7 @@ export function NodeDetailPanel({
       ) : null}
 
       <FoldedSummarySection node={node} />
-      <CteFlowSection node={node} />
+      <QueryFlowSection node={node} />
 
       <ColumnSection
         node={node}
@@ -316,8 +316,8 @@ function FoldedSummarySection({ node }: { node: GraphNode }) {
   );
 }
 
-function CteFlowSection({ node }: { node: GraphNode }) {
-  if (node.type !== "cte") {
+function QueryFlowSection({ node }: { node: GraphNode }) {
+  if (!["cte", "inline_view", "scalar_subquery", "exists_subquery", "union_branch"].includes(node.type || "")) {
     return null;
   }
 
@@ -336,7 +336,7 @@ function CteFlowSection({ node }: { node: GraphNode }) {
   return (
     <section className="graph-lineage-cluster">
       <div className="graph-lineage-head">
-        <h3>CTE Flow</h3>
+        <h3>{node.type === "cte" ? "CTE Flow" : "Subquery Flow"}</h3>
         <span className="graph-lineage-count">{flowSequence.length}</span>
       </div>
       <div className="graph-lineage-list">

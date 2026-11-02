@@ -1,6 +1,6 @@
 {
   "name": "superset-query-visualizer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,10 @@
     "dev:extension": "node ./tools/build/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "spike:compare-parsers": "node ./tools/spikes/compare-parsers.mjs",
-    "test:parser-fixtures": "node ./tools/tests/parser-fixtures.mjs"
+    "test:parser-fixtures": "node ./tools/tests/parser-fixtures.mjs",
+    "test:runtime": "node --test ./tools/tests/runtime-regressions.mjs",
+    "test:release": "node --test ./tools/tests/release-packaging.mjs",
+    "dev:store-demo": "node ./tools/store/serve-demo.mjs"
   },
   "dependencies": {
     "dt-sql-parser": "^4.4.2",

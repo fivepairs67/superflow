@@ -19,6 +19,16 @@ It is a visual SQL understanding tool with:
 
 Best experienced in Superset SQL Lab.
 
+## Install and Start
+
+Install [SuperFLOW from the Chrome Web Store](https://chromewebstore.google.com/detail/superflow/jndkmgobfdidhgcmkakkdjdgamchgbij). Developer mode is not required for the store version. Pin SuperFLOW to the Chrome toolbar for easy access.
+
+1. Open your SQL editor and click the SuperFLOW toolbar button.
+2. Click `Enable Site` to allow access to that site, then select a graph node to explore its SQL and columns.
+3. If capture is unavailable, use `Paste SQL` and `Analyze paste`. Site access is not required for pasted SQL.
+
+SQL analysis runs locally in your browser, without sending SQL to a developer or AI service. SuperFLOW does not execute SQL or connect to your database. See the [privacy policy](./PRIVACY.md).
+
 ## Why It Helps
 
 - Turn long, tangled SQL into an understandable flow of sources, CTEs, joins, filters, subqueries, and outputs.
@@ -42,7 +52,7 @@ Best experienced in Superset SQL Lab.
 - `Superset SQL Lab`
   The strongest mode. SuperFLOW can follow editor focus, push graph focus back into the editor, react to worksheet structure, and control SQL Lab-specific layout like the schema panel.
 - `Other web-based SQL editors`
-  Supported on a best-effort basis. If the site exposes readable editor state, SuperFLOW can often render a read-first graph. Behavior depends on how that site renders its editor and whether its DOM or runtime state can be observed safely.
+  Bitbucket SQL file views and OneCompiler are supported on a best-effort basis. Behavior depends on how the site exposes its editor state; capture and focus capabilities can differ by site or editor version.
 - `Clipboard / Paste`
   The universal fallback. If a site does not expose editor state cleanly, you can still analyze SQL by clipboard or direct paste.
 
@@ -50,11 +60,13 @@ Best experienced in Superset SQL Lab.
 
 SuperFLOW is designed around the current tab.
 
-1. Open the extension side panel on the SQL editor tab you want to inspect.
+1. Click the SuperFLOW toolbar button on the SQL editor tab you want to inspect.
 2. If the site has not been enabled yet, click `Enable Site` once.
 3. After that, SuperFLOW keeps working on that site without asking again, and the header shows `Site Access On`.
 4. You can click `Site Access On` later to disable access for the current site.
 5. If the site does not expose editor state in a usable way, switch to `Clipboard` or `Paste SQL`.
+
+The panel belongs to the tab where you opened it. Other tabs and Chrome windows do not open it automatically; click the toolbar button there when needed. Site access is shared by origin, but each tab keeps its own SQL session.
 
 This means SuperFLOW does **not** guarantee the same depth of integration on every web-based SQL editor. Superset SQL Lab is the reference experience. Other sites are intentionally supported as a read-first, best-effort layer.
 
@@ -96,6 +108,9 @@ Current strengths include:
 ```bash
 npm install
 npm run typecheck
+npm run test:runtime
+npm run test:parser-fixtures
+npm run test:release
 npm run build:extension
 ```
 
@@ -125,13 +140,21 @@ npm run build:release
 
 Release output:
 - `dist/release/superflow-extension-vX.Y.Z.zip`
+- `dist/release/superflow-chrome-store-vX.Y.Z.zip`
 
-Use this zip as a GitHub Release asset. The repository itself keeps source code only.
+Use the first ZIP as a GitHub Release asset. Upload the second ZIP to the Chrome Web Store; it places `manifest.json` at the archive root. Generated extension bundles and release ZIPs are not committed.
+
+## Support and Limitations
+
+This is a beta SQL understanding aid, not an execution plan or a guarantee of query correctness. Unsupported syntax may use heuristic analysis, and column lineage without schema metadata can be incomplete. Check the SQL before making changes.
+
+Report problems through [GitHub Issues](https://github.com/fivepairs67/superflow/issues). Include the extension version, Chrome version, site/editor type, dialect, and a minimal synthetic SQL example. Do not include credentials, company table names, private URLs, or confidential SQL.
 
 ## Docs
 
 - [Task Checklist](./TASKS.md)
 - [GitHub Release Checklist](./docs/GITHUB_RELEASE_CHECKLIST.md)
+- [Chrome Web Store Submission](./docs/store/SUBMISSION.md)
 - [Design Doc](./docs/DESIGN.md)
 - [React Redesign](./docs/REACT_REDESIGN.md)
 - [Column Lineage Plan](./docs/COLUMN_LINEAGE_PLAN.md)

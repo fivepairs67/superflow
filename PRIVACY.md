@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated: 2026-03-15
+Last updated: 2026-11-02
 
 This Privacy Policy explains how **SuperFLOW** handles data when used as a Chrome extension.
 
@@ -44,7 +44,7 @@ SuperFLOW performs its SQL analysis and UI rendering locally in the user's brows
 
 ## 4. Data Sharing and External Transmission
 
-SuperFLOW does **not** send SQL text, clipboard contents, or user data to the developer's servers.
+SuperFLOW does **not** send SQL text, clipboard contents, or user data to the developer's servers or to AI services. It includes no analytics or advertising SDKs. It does not execute SQL or connect directly to databases.
 
 SuperFLOW does not:
 
@@ -53,6 +53,8 @@ SuperFLOW does not:
 - use user data for profiling unrelated to the extension's core functionality
 
 When integrated with a website such as Superset SQL Lab, SuperFLOW may observe the page's own editor state or page-origin network activity to understand the current SQL context. This is part of the extension's local functionality and is not a transfer to the developer.
+
+For supported Bitbucket file views, SuperFLOW may request the raw SQL file from the same website using the user's existing signed-in browser session. This retrieves the complete file rather than only visible editor lines. The request goes to that website, not to the developer or an AI service; the website's own privacy policy still applies. Local analysis does not mean that the host website makes no network requests.
 
 ## 5. Permissions and Why They Are Used
 
@@ -71,9 +73,12 @@ When integrated with a website such as Superset SQL Lab, SuperFLOW may observe t
 
 ## 6. Data Retention
 
-- session data stored in `chrome.storage.session` may be cleared when the browser session ends
+- per-tab SQL, analysis, page context, and available execution metadata are kept in `chrome.storage.session`; closing the tab removes its session, and Chrome clears session storage when the browser restarts or the extension is reloaded, disabled, or updated
 - local preference data stored in `chrome.storage.local` remains until the user clears it or removes the extension
-- pasted or captured SQL is retained only as needed for local analysis state unless the user clears it or replaces it
+- replacing captured SQL replaces that captured input; returning to page SQL clears the captured input from the tab session
+- disabling site access clears page-derived SQL and analysis from matching open-tab sessions, but deliberately preserves manually captured SQL
+
+Closing the side panel alone does not clear the tab session. Local preferences include the Superset schema-panel visibility setting for an origin, not a permanent SQL history. The chosen SQL dialect is part of the per-tab session. SuperFLOW does not use Chrome sync storage for SQL or preferences.
 
 ## 7. User Control
 
@@ -92,3 +97,7 @@ SuperFLOW is designed to keep processing local to the browser wherever possible.
 ## 9. Changes to This Policy
 
 This Privacy Policy may be updated if the extension's functionality, permissions, or data practices change. The latest version will be published in this document.
+
+## 10. Contact
+
+Privacy questions: [fivepairs67@gmail.com](mailto:fivepairs67@gmail.com). Please do not send confidential SQL or credentials in support requests.

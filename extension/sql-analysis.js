@@ -1,5 +1,6 @@
 import { HiveSQL, TrinoSQL } from "./vendor/dt-sql-parser-shim.js";
 import nodeSqlParser from "node-sql-parser";
+import { extractClauseRanges, extractTopLevelJoinMatches } from "./sql-clause-ranges.js";
 
 const CLAUSE_ORDER = [
   { key: "join", label: "JOIN" },
@@ -57,6 +58,7 @@ const HEURISTIC_ALIAS_STOP_WORDS = new Set([
   "when",
   "then",
   "using",
+  "lateral",
 ]);
 const HEURISTIC_COLUMN_STOP_WORDS = new Set([
   "select",
@@ -87,6 +89,23 @@ const HEURISTIC_COLUMN_STOP_WORDS = new Set([
   "cast",
   "true",
   "false",
+  "is",
+  "in",
+  "like",
+  "between",
+  "filter",
+  "rows",
+  "range",
+  "unbounded",
+  "preceding",
+  "following",
+  "current",
+  "row",
+  "nulls",
+  "first",
+  "last",
+  "interval",
+  "grouping__id",
 ]);
 
 export function analyzeSql(rawSql, options = {}) {
@@ -207,6 +226,13 @@ function inferDialectFromSql(sql) {
     { regex: /\breturning\b/g, weight: 3, label: "returning" },
   ]);
   addDialectSignals(input, score, signals, "hive", [
+    { regex: /\bset\s+(?:hivevar|hiveconf)\s*:/g, weight: 8, label: "hive-variable" },
+    { regex: /\bset\s+(?:hive|mapred|mapreduce|tez)\./g, weight: 8, label: "hive-setting" },
+    { regex: /\badd\s+(?:jar|file|archive)\b/g, weight: 8, label: "hive-resource" },
+    { regex: /\bcreate\s+temporary\s+function\b/g, weight: 8, label: "temporary-function" },
+    { regex: /\binsert\s+overwrite\s+(?:table|directory)\b/g, weight: 7, label: "insert-overwrite" },
+    { regex: /\bpartitioned\s+by\b/g, weight: 7, label: "partitioned-by" },
+    { regex: /\brow\s+format\b/g, weight: 7, label: "row-format" },
     { regex: /\blateral\s+view\b/g, weight: 5, label: "lateral-view" },
     { regex: /\bexplode\s*\(/g, weight: 4, label: "explode" },
     { regex: /\bposexplode\s*\(/g, weight: 4, label: "posexplode" },
@@ -476,7 +502,10 @@ function analyzeStatement(statementInput, index, dialectContext) {
     ctes: hydratedCtes,
     statementSources,
     statementColumns,
-    statementSubqueries: astInfo?.statementSubqueries || [],
+    statementSubqueries: mergeSubqueryRanges(
+      astInfo?.statementSubqueries || [],
+      extractHeuristicSubqueries(cteInfo.mainStatement || logicalSql, "statement:main", cteInfo.mainStatementStart ?? 0),
+    ),
     writes,
     clauses,
     joinTypes: statementJoins,
@@ -830,7 +859,7 @@ function buildDtAstInfo(sql, parserDialect, entities) {
     const columns = extractHeuristicOutputColumns(
       cte.body || "",
       `cte:${cte.name}`,
-      0,
+      cte.bodyRangeStart ?? 0,
       cteNames,
       availableColumnsBySource,
     );
@@ -1044,6 +1073,15 @@ function extractLogicalAst(ast) {
 
   if (ast.type === "insert" && ast.select) {
     return ast.select;
+  }
+
+  if (ast.type === "insert" && ast.values?.type === "select") {
+    return {
+      ...ast.values,
+      with: ast.values.with || ast.with,
+      conflict: ast.conflict,
+      returning: ast.returning,
+    };
   }
 
   return ast;
@@ -1264,6 +1302,7 @@ function collectAstJoinTypes(node, joinTypes) {
     return;
   }
 
+  // Nested SELECTs and UNION branches own their JOIN types.
   for (const group of extractAstSourceGroups(node)) {
     if (group.defaultType === "using" && group.entries.length) {
       joinTypes.push("USING");
@@ -1275,21 +1314,7 @@ function collectAstJoinTypes(node, joinTypes) {
       if (joinType) {
         joinTypes.push(joinType);
       }
-
-      collectAstJoinTypes(entry?.expr || entry?.stmt || entry?.query_expr, joinTypes);
     }
-  }
-
-  if (node._next) {
-    collectAstJoinTypes(node._next, joinTypes);
-  }
-
-  for (const [key, value] of Object.entries(node)) {
-    if (key === "from" || key === "join") {
-      continue;
-    }
-
-    collectAstJoinTypes(value, joinTypes);
   }
 }
 
@@ -1323,7 +1348,10 @@ function extractAstSubqueries(ast, ownerNodeId, cteNames = []) {
         const sourceRole = entry?.join ? "join" : group.defaultType;
 
         if (wrapper?.ast && typeof wrapper.ast === "object") {
-          registerSubquery(wrapper.ast, "inline_view", currentOwnerNodeId, { sourceRole });
+          registerSubquery(wrapper.ast, "inline_view", currentOwnerNodeId, {
+            sourceRole,
+            alias: normalizeAstIdentifier(entry.as),
+          });
           continue;
         }
 
@@ -1444,7 +1472,8 @@ function extractAstSubqueries(ast, ownerNodeId, cteNames = []) {
       id: subqueryNodeId,
       parentNodeId: currentOwnerNodeId,
       type: kind,
-      label: options.label || buildSubqueryLabel(kind),
+      label: options.label || buildSubqueryLabel(kind, options.alias),
+      alias: options.alias || null,
       statementType: detectAstStatementType(subAst),
       sources,
       readSources,
@@ -1623,6 +1652,8 @@ function extractHeuristicSubqueries(sql, ownerNodeId, baseOffset = 0) {
         hasExplicitSetBranches,
         alias: inlineViewAlias || null,
         sourceRole,
+        bodyRangeStart: currentBaseOffset + index + 1,
+        bodyRangeEnd: currentBaseOffset + balanced.nextIndex - 1,
         rangeStart: primarySubqueryRange.start,
         rangeEnd: primarySubqueryRange.end,
         ranges: subqueryRanges,
@@ -2022,7 +2053,12 @@ function detectAstClauses(ast, joinTypes, sql) {
     where: Boolean(ast?.where) || heuristic.where,
     groupBy: Boolean(ast?.groupby?.length) || heuristic.groupBy,
     having: Boolean(ast?.having) || heuristic.having,
-    window: Boolean(ast?.window) || heuristic.window,
+    window:
+      Boolean(ast?.window) ||
+      hasAstWindowExpression(ast?.columns) ||
+      hasAstWindowExpression(ast?.orderby) ||
+      hasAstWindowExpression(ast?.qualify) ||
+      heuristic.window,
     qualify: Boolean(ast?.qualify) || heuristic.qualify,
     union: Boolean(ast?._next) || heuristic.union,
     orderBy: Boolean(ast?.orderby?.length) || heuristic.orderBy,
@@ -2040,6 +2076,19 @@ function detectAstClauses(ast, joinTypes, sql) {
           ast?.limit?.value,
       ) || heuristic.offset,
   };
+}
+
+function hasAstWindowExpression(node) {
+  if (!node || typeof node !== "object") {
+    return false;
+  }
+  if (Array.isArray(node)) {
+    return node.some(hasAstWindowExpression);
+  }
+  if (node.type === "select" || node.ast) {
+    return false;
+  }
+  return Boolean(node.over) || node.type === "window_func" || Object.values(node).some(hasAstWindowExpression);
 }
 
 function extractAstGroupByKind(_ast, sql = "") {
@@ -2106,7 +2155,8 @@ function extractAstWrites(ast) {
 
   if (ast.type === "insert") {
     const name = buildAstObjectName(ast.table?.[0] || ast.table);
-    return name ? [{ name, kind: "insert_into" }] : [];
+    const kind = /^overwrite\b/i.test(ast.prefix || "") ? "insert_overwrite" : "insert_into";
+    return name ? [{ name, kind }] : [];
   }
 
   return [];
@@ -2165,6 +2215,16 @@ function extractAstSampleKind(entry) {
 }
 
 function extractAstOutputColumns(ast, nodeId, cteNames = [], availableColumnsBySource = new Map()) {
+  if (ast?._next) {
+    const branches = [];
+    for (let branch = ast; branch; branch = branch._next) {
+      branches.push(extractAstOutputColumns(
+        { ...branch, _next: null }, nodeId, cteNames, availableColumnsBySource,
+      ));
+    }
+    return mergeSetOperationColumns(branches);
+  }
+
   const columns = Array.isArray(ast?.columns) ? ast.columns : [];
   const sources = extractAstImmediateSources(ast);
   const aliasMap = buildAstAliasMap(ast, sources);
@@ -2212,7 +2272,11 @@ function applyColumnSpansToColumns(columns, sqlSegment, baseOffset = 0) {
     return columns || [];
   }
 
-  const itemRanges = extractSelectItemRanges(maskCommentsPreserveOffsets(sqlSegment), baseOffset);
+  const branches = splitOutputColumnBranches(sqlSegment, baseOffset);
+  const branchRanges = branches.map((branch) =>
+    extractSelectItemRanges(maskCommentsPreserveOffsets(branch.sql), branch.rangeStart),
+  );
+  const itemRanges = branchRanges[0] || [];
 
   return columns.map((column, index) => {
     const range = itemRanges[column.selectItemIndex ?? index];
@@ -2221,15 +2285,16 @@ function applyColumnSpansToColumns(columns, sqlSegment, baseOffset = 0) {
       return column;
     }
 
+    const spans = column.branchSelectItemIndexes
+      ? branchRanges.flatMap((ranges, branchIndex) => {
+          const itemIndex = column.branchSelectItemIndexes[branchIndex];
+          return itemIndex != null && ranges[itemIndex] ? [ranges[itemIndex]] : [];
+        })
+      : [range];
     return {
       ...column,
       expressionSql: sqlSegment.slice(range.start - baseOffset, range.end - baseOffset).trim(),
-      spans: [
-        {
-          start: range.start,
-          end: range.end,
-        },
-      ],
+      spans,
     };
   });
 }
@@ -2373,6 +2438,17 @@ function extractHeuristicOutputColumns(
     return [];
   }
 
+  const branches = splitOutputColumnBranches(sql, baseOffset);
+  if (branches.length > 1) {
+    return mergeSetOperationColumns(branches.map((branch) => extractHeuristicOutputColumns(
+      branch.sql, nodeId, branch.rangeStart, cteNames, availableColumnsBySource,
+    )));
+  }
+  if (branches[0] && branches[0].sql !== sql) {
+    return extractHeuristicOutputColumns(branches[0].sql, nodeId, branches[0].rangeStart,
+      cteNames, availableColumnsBySource);
+  }
+
   const sources = extractSources(sql, 0);
   const aliasMap = buildHeuristicAliasMap(sql, sources);
   const cteNameSet = new Set((cteNames || []).map((name) => normalizeName(name)));
@@ -2407,7 +2483,7 @@ function extractHeuristicOutputColumns(
     const name = deriveHeuristicOutputColumnName(expressionSql, index);
     const upstream = uniqueColumnRefs(
       collectHeuristicColumnRefs(expressionSql).map((ref) =>
-        resolveAstColumnRef(ref, aliasMap, sourceNames, cteNameSet),
+        resolveHeuristicColumnRef(ref, sources, aliasMap, cteNameSet, nodeId, baseOffset),
       ),
     );
 
@@ -2431,6 +2507,65 @@ function extractHeuristicOutputColumns(
       },
     ];
   });
+}
+
+function mergeSetOperationColumns(branches) {
+  const first = branches[0] || [];
+  // Set operations align columns by position, not by alias or source name.
+  return first.map((column, index) => ({
+    ...column,
+    upstream: uniqueColumnRefs(branches.flatMap((branch) => branch[index]?.upstream || [])),
+    branchSelectItemIndexes: branches.map((branch) => branch[index]?.selectItemIndex ?? null),
+  }));
+}
+
+function splitOutputColumnBranches(sql, baseOffset = 0) {
+  let segment = trimSqlSegment(sql, 0, sql.length, baseOffset);
+  if (!segment) {
+    return [];
+  }
+  while (segment.sql.startsWith("(")) {
+    const wrapper = readBalanced(segment.sql, 0, "(", ")");
+    if (wrapper.nextIndex !== segment.sql.length) {
+      break;
+    }
+    const inner = trimSqlSegment(segment.sql, 1, segment.sql.length - 1, segment.rangeStart);
+    if (!inner) {
+      break;
+    }
+    segment = inner;
+  }
+  const branches = splitTopLevelSetBranches(segment.sql, segment.rangeStart);
+  return branches.length > 1
+    ? branches.flatMap((branch) => splitOutputColumnBranches(branch.sql, branch.rangeStart))
+    : branches;
+}
+
+function lateralViewNodeId(ownerNodeId, rangeStart) {
+  const owner = ownerNodeId === "result:main" ? "statement:main" : ownerNodeId;
+  return `lateral:${owner}:${rangeStart}`;
+}
+
+function resolveHeuristicColumnRef(ref, sources, aliasMap, cteNameSet, ownerNodeId, baseOffset = 0) {
+  const lateral = sources.find((source) => source.type === "lateral_view" && (
+    ref.qualifier
+      ? normalizeName(source.alias) === normalizeName(ref.qualifier)
+      : source.outputColumns?.some((name) => normalizeName(name) === normalizeName(ref.columnName))
+  ));
+  if (lateral) {
+    return {
+      sourceNodeId: lateralViewNodeId(ownerNodeId, baseOffset + lateral.rangeStart),
+      sourceName: lateral.alias || lateral.name,
+      qualifier: ref.qualifier || null,
+      columnName: ref.columnName,
+    };
+  }
+  return resolveAstColumnRef(
+    ref,
+    aliasMap,
+    sources.filter((source) => source.type !== "lateral_view").map((source) => source.name),
+    cteNameSet,
+  );
 }
 
 function buildHeuristicAliasMap(sql, sources) {
@@ -2629,25 +2764,42 @@ function detectHeuristicColumnRole(expressionSql) {
 }
 
 function collectHeuristicColumnRefs(expressionSql) {
-  const masked = maskQuotedStrings(expressionSql);
-  const regex = /(?:^|[^a-zA-Z0-9_$])((?:[a-zA-Z_][a-zA-Z0-9_$]*\.)?[a-zA-Z_][a-zA-Z0-9_$]*)(?!\s*\()/g;
+  let expression = maskCommentsPreserveOffsets(expressionSql);
+  const aliasStart = findTopLevelKeyword(expression, "as", 0);
+  if (aliasStart >= 0) {
+    expression = expression.slice(0, aliasStart);
+  } else {
+    const alias = /[)\]'"`a-zA-Z0-9_$]\s+("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[a-zA-Z_][a-zA-Z0-9_$]*)\s*$/.exec(expression);
+    if (alias && !HEURISTIC_COLUMN_STOP_WORDS.has(normalizeName(alias[1]))) {
+      expression = expression.slice(0, expression.lastIndexOf(alias[1]));
+    }
+  }
+  const masked = expression.replace(/'([^']|'')*'/g, (value) => " ".repeat(value.length));
+  const atom = '(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[(?:[^\\]]|\\]\\])*\\]|[a-zA-Z_][a-zA-Z0-9_$]*)';
+  const regex = new RegExp(`${atom}(?:\\s*\\.\\s*${atom})*`, "g");
   const refs = [];
   let match = regex.exec(masked);
+  let previousToken = "";
 
   while (match) {
-    const token = match[1];
+    const token = match[0];
     const normalized = normalizeName(token);
+    const parts = token.match(new RegExp(atom, "g")).map(stripIdentifierQuotes);
+    const isQualified = parts.length > 1;
+    const isQuoted = /^["`\[]/.test(token);
+    const isFunction = /^\s*\(/.test(masked.slice(regex.lastIndex));
+    const isType = previousToken === "as" || /::\s*$/.test(masked.slice(0, match.index));
+    const isNumericSuffix = /[a-zA-Z0-9_$]/.test(masked[match.index - 1] || "");
 
-    if (!HEURISTIC_COLUMN_STOP_WORDS.has(normalized)) {
-      const [qualifier, columnName] = token.includes(".")
-        ? token.split(/\.(?=[^.]+$)/)
-        : [null, token];
+    if (!isFunction && !isType && !isNumericSuffix &&
+        (isQualified || isQuoted || !HEURISTIC_COLUMN_STOP_WORDS.has(normalized))) {
       refs.push({
-        qualifier: qualifier || null,
-        columnName,
+        qualifier: isQualified ? parts.slice(0, -1).join(".") : null,
+        columnName: parts.at(-1),
       });
     }
 
+    previousToken = normalized;
     match = regex.exec(masked);
   }
 
@@ -3133,6 +3285,7 @@ function uniqueColumnRefs(refs) {
 
   for (const ref of refs || []) {
     const key = [
+      normalizeName(ref?.sourceNodeId),
       normalizeName(ref?.sourceName),
       normalizeName(ref?.qualifier),
       normalizeName(ref?.columnName),
@@ -3207,6 +3360,7 @@ function mergeCteAnalysis(ctes, heuristicCtes) {
       sourceCount: countNonDependencySources(sources, dependencies),
       dependencies,
       sources,
+      subqueries: mergeSubqueryRanges(cte.subqueries || [], heuristic.subqueries || []),
       joinTypes: cte.joinTypes?.length ? cte.joinTypes : heuristic.joinTypes,
       statementType,
       bodyRangeStart:
@@ -3216,6 +3370,45 @@ function mergeCteAnalysis(ctes, heuristicCtes) {
       body: cte.body || heuristic.body,
       columns: cte.columns?.length ? cte.columns : heuristic.columns || [],
       flowSequence,
+    };
+  });
+}
+
+function mergeSubqueryRanges(subqueries, rangedSubqueries) {
+  const parentIds = new Map();
+  const used = new Set();
+  const sourceKey = (node) => (node.sources || [])
+    .map((source) => normalizeName(source.name)).sort().join("|");
+
+  return subqueries.map((node) => {
+    const parentId = parentIds.get(node.parentNodeId) || node.parentNodeId;
+    const candidates = rangedSubqueries.filter((candidate) =>
+      !used.has(candidate.id) && candidate.parentNodeId === parentId && candidate.type === node.type,
+    );
+    const ranged = candidates.find((candidate) => node.alias
+      ? normalizeName(candidate.alias) === normalizeName(node.alias)
+      : sourceKey(candidate) === sourceKey(node));
+
+    if (!ranged) {
+      return node;
+    }
+
+    used.add(ranged.id);
+    parentIds.set(node.id, ranged.id);
+    if (typeof node.rangeStart === "number" && typeof node.rangeEnd === "number") {
+      return { ...node, bodyRangeStart: ranged.bodyRangeStart, bodyRangeEnd: ranged.bodyRangeEnd };
+    }
+
+    return {
+      ...node,
+      alias: node.alias || ranged.alias,
+      label: node.alias ? node.label : ranged.label,
+      rangeStart: ranged.rangeStart,
+      rangeEnd: ranged.rangeEnd,
+      ranges: ranged.ranges,
+      bodyRangeStart: ranged.bodyRangeStart,
+      bodyRangeEnd: ranged.bodyRangeEnd,
+      sources: mergeSourcesWithRanges(node.sources || [], ranged.sources || []),
     };
   });
 }
@@ -3232,6 +3425,9 @@ function mergeSourcesWithRanges(primarySources, rangedSources) {
   const rangedByName = new Map();
 
   for (const source of rangedSources || []) {
+    if (source.type === "lateral_view") {
+      continue;
+    }
     const key = normalizeName(source.name);
 
     if (!key) {
@@ -3242,6 +3438,12 @@ function mergeSourcesWithRanges(primarySources, rangedSources) {
   }
 
   for (const source of primarySources || []) {
+    if (source.type === "lateral_view") {
+      if (!(rangedSources || []).some((candidate) => candidate.type === "lateral_view")) {
+        merged.push(source);
+      }
+      continue;
+    }
     const ranged = rangedByName.get(normalizeName(source.name));
 
     if (!ranged) {
@@ -3287,6 +3489,10 @@ function mergeSourcesWithRanges(primarySources, rangedSources) {
   }
 
   for (const source of rangedSources || []) {
+    if (source.type === "lateral_view") {
+      merged.push(source);
+      continue;
+    }
     const key = normalizeName(source.name);
 
     if (!key) {
@@ -3688,7 +3894,7 @@ function splitStatementsDetailed(sql) {
       const rawFragment = sql.slice(start, index);
       const fragment = normalizeSql(rawFragment);
 
-      if (fragment) {
+      if (fragment && maskedSql.slice(start, index).trim()) {
         const offset = rawFragment.indexOf(fragment);
         statements.push({
           sql: fragment,
@@ -3706,7 +3912,7 @@ function splitStatementsDetailed(sql) {
   const rawLast = sql.slice(start);
   const last = normalizeSql(rawLast);
 
-  if (last) {
+  if (last && maskedSql.slice(start).trim()) {
     const offset = rawLast.indexOf(last);
     statements.push({
       sql: last,
@@ -3881,6 +4087,7 @@ function analyzeCte(cte, cteNames) {
     name: cte.name,
     recursive: Boolean(cte.recursive),
     sources,
+    subqueries: extractHeuristicSubqueries(cte.body, `cte:${cte.name}`, cte.bodyRangeStart ?? 0),
     sourceCount: countNonDependencySources(sources, dependencies),
     dependencies,
     rangeStart: cte.rangeStart,
@@ -3909,7 +4116,7 @@ function analyzeHeuristicCtes(ctes, cteNames) {
     const columns = extractHeuristicOutputColumns(
       cte.body || "",
       `cte:${cte.name}`,
-      0,
+      cte.bodyRangeStart ?? 0,
       cteNames,
       availableColumnsBySource,
     );
@@ -4014,21 +4221,9 @@ function extractSources(sql, baseOffset = 0) {
       const viewIndex = skipWhitespace(maskedSql, index + "lateral".length);
 
       if (startsWithWord(maskedSql, viewIndex, "view")) {
-        const localStart = index;
-        const localEnd = viewIndex + "view".length;
-        results.push({
-          name: "LATERAL VIEW",
-          type: "lateral_view",
-          rangeStart: baseOffset + localStart,
-          rangeEnd: baseOffset + localEnd,
-          ranges: [
-            {
-              start: baseOffset + localStart,
-              end: baseOffset + localEnd,
-            },
-          ],
-        });
-        index = localEnd;
+        const source = readLateralViewSource(maskedSql, index, viewIndex + "view".length, baseOffset);
+        results.push(source);
+        index = source.rangeEnd - baseOffset;
         continue;
       }
     }
@@ -4091,6 +4286,46 @@ function extractSources(sql, baseOffset = 0) {
   }
 
   return mergeSourceMatches(results);
+}
+
+function readLateralViewSource(sql, start, viewEnd, baseOffset) {
+  let cursor = skipWhitespace(sql, viewEnd);
+  if (startsWithWord(sql, cursor, "outer")) {
+    cursor = skipWhitespace(sql, cursor + 5);
+  }
+  const functionStart = cursor;
+  const fn = readIdentifier(sql, cursor);
+  const open = fn ? skipWhitespace(sql, fn.nextIndex) : -1;
+  const call = sql[open] === "(" ? readBalanced(sql, open, "(", ")") : null;
+  let end = call?.nextIndex ?? viewEnd;
+  const alias = call ? readIdentifier(sql, end) : null;
+  const outputColumns = [];
+  if (alias && !HEURISTIC_ALIAS_STOP_WORDS.has(normalizeName(alias.value))) {
+    end = alias.nextIndex;
+    cursor = skipWhitespace(sql, end);
+    if (startsWithWord(sql, cursor, "as")) {
+      cursor = skipWhitespace(sql, cursor + 2);
+      while (cursor < sql.length) {
+        const column = readIdentifier(sql, cursor);
+        if (!column || HEURISTIC_ALIAS_STOP_WORDS.has(normalizeName(column.value))) break;
+        outputColumns.push(stripIdentifierQuotes(column.value));
+        end = column.nextIndex;
+        cursor = skipWhitespace(sql, end);
+        if (sql[cursor] !== ",") break;
+        cursor = skipWhitespace(sql, cursor + 1);
+      }
+    }
+  }
+  return {
+    name: "LATERAL VIEW",
+    type: "lateral_view",
+    alias: alias && end >= alias.nextIndex ? stripIdentifierQuotes(alias.value) : "",
+    outputColumns,
+    expressionSql: call ? sql.slice(functionStart, call.nextIndex) : "",
+    rangeStart: baseOffset + start,
+    rangeEnd: baseOffset + end,
+    ranges: [{ start: baseOffset + start, end: baseOffset + end }],
+  };
 }
 
 function countNonDependencySources(sources, dependencies = []) {
@@ -4215,53 +4450,16 @@ function extractJoinTypes(sql) {
 }
 
 function detectClauses(sql, joinTypes) {
-  const maskedSql = maskCommentsPreserveOffsets(sql);
+  const ranges = extractClauseRanges(sql);
   return {
-    distinct: /^\s*select\s+distinct(?:\s+on)?\b/i.test(maskedSql),
+    ...Object.fromEntries(CLAUSE_ORDER.map(({ key }) => [key, ranges.has(key)])),
     join: joinTypes.length > 0,
-    mergeOn: /\bmerge\s+into\b[\s\S]*?\busing\b[\s\S]*?\bon\b/i.test(maskedSql),
-    matched: /\bwhen\s+matched\b/i.test(maskedSql),
-    notMatched: /\bwhen\s+not\s+matched\b/i.test(maskedSql),
-    set: /^\s*update\b[\s\S]*?\bset\b/i.test(maskedSql),
-    values: /\bvalues\s*\(/i.test(maskedSql),
-    conflict: /\bon\s+conflict\b/i.test(maskedSql),
-    conflictAction: /\bdo\s+(?:update|nothing)\b/i.test(maskedSql),
-    returning: /\breturning\b/i.test(maskedSql),
-    where: hasTopLevelKeyword(maskedSql, "where"),
-    groupBy: hasTopLevelPhrase(maskedSql, "group", "by"),
-    having: hasTopLevelKeyword(maskedSql, "having"),
-    window: /\bover\s*\(|\bwindow\b/i.test(maskedSql),
-    qualify: hasTopLevelKeyword(maskedSql, "qualify"),
-    union: Boolean(detectSetOperatorKind(maskedSql)),
-    orderBy: hasTopLevelPhrase(maskedSql, "order", "by"),
-    limit: hasTopLevelKeyword(maskedSql, "limit"),
-    offset: hasTopLevelKeyword(maskedSql, "offset"),
   };
 }
 
-function hasTopLevelKeyword(sql, keyword) {
-  return findTopLevelKeyword(sql, keyword, 0) >= 0;
-}
-
-function hasTopLevelPhrase(sql, firstKeyword, secondKeyword) {
-  const firstIndex = findTopLevelKeyword(sql, firstKeyword, 0);
-
-  if (firstIndex < 0) {
-    return false;
-  }
-
-  const secondIndex = findTopLevelKeyword(sql, secondKeyword, firstIndex + firstKeyword.length);
-
-  if (secondIndex < 0) {
-    return false;
-  }
-
-  const between = sql.slice(firstIndex + firstKeyword.length, secondIndex);
-  return /^\s*$/.test(between);
-}
-
 function detectGroupByKind(sql) {
-  const maskedSql = maskCommentsPreserveOffsets(sql);
+  const range = extractClauseRanges(sql).get("groupBy");
+  const maskedSql = range ? maskCommentsPreserveOffsets(sql.slice(range.start, range.end)) : "";
 
   if (/\bgroup\s+by\s+grouping\s+sets\s*\(/i.test(maskedSql)) {
     return "GROUPING SETS";
@@ -4367,6 +4565,20 @@ function detectStandaloneDirective(sql) {
       statementType: "USE",
       title: target ? `USE ${target}` : "USE",
       directiveName: target,
+      graphNodeType: "directive",
+    };
+  }
+
+  const resourceMatch = normalized.match(/^add\s+(jar|file|archive)\s+(.+)$/is);
+  const functionMatch = normalized.match(/^create\s+temporary\s+function\s+([^\s]+)\s+as\b/i);
+
+  if (resourceMatch || functionMatch) {
+    return {
+      statementType: "CONFIG",
+      title: resourceMatch
+        ? `ADD ${resourceMatch[1].toUpperCase()}`
+        : `CREATE TEMPORARY FUNCTION ${functionMatch[1]}`,
+      directiveName: resourceMatch ? resourceMatch[2].trim() : functionMatch[1],
       graphNodeType: "directive",
     };
   }
@@ -4533,271 +4745,6 @@ function buildFlowSequence(
   return flow;
 }
 
-function extractClauseRanges(sql, baseOffset = 0) {
-  const maskedSql = maskCommentsPreserveOffsets(sql);
-  const patterns = [
-    { key: "distinct", regex: /^\s*select\s+distinct(?:\s+on)?\b/i },
-    { key: "join", regex: null },
-    { key: "mergeOn", regex: null },
-    { key: "matched", regex: /\bwhen\s+matched\b/i },
-    { key: "notMatched", regex: /\bwhen\s+not\s+matched\b/i },
-    { key: "set", regex: /\bset\b/i },
-    { key: "values", regex: /\bvalues\s*\(/i },
-    { key: "conflict", regex: /\bon\s+conflict\b/i },
-    { key: "conflictAction", regex: /\bdo\s+(?:update|nothing)\b/i },
-    { key: "returning", regex: /\breturning\b/i },
-    { key: "where", regex: /\bwhere\b/i },
-    { key: "groupBy", regex: /\bgroup\s+by\b/i },
-    { key: "having", regex: /\bhaving\b/i },
-    { key: "window", regex: /\bover\s*\(|\bwindow\b/i },
-    { key: "qualify", regex: /\bqualify\b/i },
-    { key: "union", regex: /\b(?:union(?:\s+all)?|intersect|except)\b/i },
-    { key: "orderBy", regex: /\border\s+by\b/i },
-    { key: "limit", regex: /\blimit\b/i },
-    { key: "offset", regex: /\boffset\b/i },
-  ];
-  const matches = patterns
-    .map((pattern) => {
-      if (pattern.key === "mergeOn") {
-        const mergeOnIndex = findMergeOnIndex(maskedSql);
-
-        if (mergeOnIndex < 0) {
-          return null;
-        }
-
-        return {
-          key: pattern.key,
-          start: baseOffset + mergeOnIndex,
-        };
-      }
-
-      if (pattern.key === "join") {
-        const firstJoinMatch = extractTopLevelJoinMatches(maskedSql)[0] || null;
-
-        if (!firstJoinMatch) {
-          return null;
-        }
-
-        return {
-          key: pattern.key,
-          start: baseOffset + firstJoinMatch.start,
-        };
-      }
-
-      const match = pattern.regex.exec(maskedSql);
-
-      if (!match || typeof match.index !== "number") {
-        return null;
-      }
-
-      return {
-        key: pattern.key,
-        start: baseOffset + match.index,
-      };
-    })
-    .filter(Boolean)
-    .sort((left, right) => left.start - right.start);
-  const ranges = new Map();
-
-  matches.forEach((match, index) => {
-    const next = matches[index + 1];
-    ranges.set(match.key, {
-      start: match.start,
-      end: next ? next.start : baseOffset + maskedSql.length,
-    });
-  });
-
-  return ranges;
-}
-
-function extractTopLevelJoinMatches(sql) {
-  const input = String(sql || "");
-  const maskedSql = maskCommentsPreserveOffsets(input);
-  const matches = [];
-  const modifierWords = new Set(["left", "right", "inner", "full", "cross"]);
-  const extensionWords = new Set(["outer", "semi", "anti"]);
-  let index = 0;
-  let depth = 0;
-  let mode = "normal";
-  let dollarTag = null;
-  let pendingModifier = "";
-  let pendingModifierStart = -1;
-
-  while (index < maskedSql.length) {
-    const char = maskedSql[index];
-    const next = maskedSql[index + 1] || "";
-
-    if (mode === "single_quote") {
-      if (char === "'" && next === "'") {
-        index += 2;
-        continue;
-      }
-
-      if (char === "'") {
-        mode = "normal";
-      }
-
-      index += 1;
-      continue;
-    }
-
-    if (mode === "double_quote") {
-      if (char === '"') {
-        mode = "normal";
-      }
-
-      index += 1;
-      continue;
-    }
-
-    if (mode === "backtick") {
-      if (char === "`") {
-        mode = "normal";
-      }
-
-      index += 1;
-      continue;
-    }
-
-    if (mode === "bracket") {
-      if (char === "]") {
-        mode = "normal";
-      }
-
-      index += 1;
-      continue;
-    }
-
-    if (mode === "dollar_quote") {
-      if (dollarTag && maskedSql.slice(index, index + dollarTag.length) === dollarTag) {
-        index += dollarTag.length;
-        mode = "normal";
-        dollarTag = null;
-        continue;
-      }
-
-      index += 1;
-      continue;
-    }
-
-    if (char === "'") {
-      mode = "single_quote";
-      index += 1;
-      continue;
-    }
-
-    if (char === '"') {
-      mode = "double_quote";
-      index += 1;
-      continue;
-    }
-
-    if (char === "`") {
-      mode = "backtick";
-      index += 1;
-      continue;
-    }
-
-    if (char === "[") {
-      mode = "bracket";
-      index += 1;
-      continue;
-    }
-
-    if (char === "$") {
-      const dollarMatch = maskedSql.slice(index).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$/);
-
-      if (dollarMatch) {
-        dollarTag = dollarMatch[0];
-        mode = "dollar_quote";
-        index += dollarTag.length;
-        continue;
-      }
-    }
-
-    if (char === "(") {
-      depth += 1;
-      pendingModifier = "";
-      pendingModifierStart = -1;
-      index += 1;
-      continue;
-    }
-
-    if (char === ")" && depth > 0) {
-      depth -= 1;
-      pendingModifier = "";
-      pendingModifierStart = -1;
-      index += 1;
-      continue;
-    }
-
-    if (depth > 0) {
-      index += 1;
-      continue;
-    }
-
-    if (/[A-Za-z_]/.test(char)) {
-      let wordEnd = index + 1;
-
-      while (wordEnd < maskedSql.length && /[A-Za-z_]/.test(maskedSql[wordEnd])) {
-        wordEnd += 1;
-      }
-
-      const word = maskedSql.slice(index, wordEnd).toLowerCase();
-
-      if (modifierWords.has(word)) {
-        pendingModifier = word.toUpperCase();
-        pendingModifierStart = index;
-        index = wordEnd;
-        continue;
-      }
-
-      if (extensionWords.has(word) && pendingModifier) {
-        index = wordEnd;
-        continue;
-      }
-
-      if (word === "join") {
-        matches.push({
-          type: pendingModifier || "JOIN",
-          start: pendingModifierStart >= 0 ? pendingModifierStart : index,
-          end: wordEnd,
-        });
-        pendingModifier = "";
-        pendingModifierStart = -1;
-        index = wordEnd;
-        continue;
-      }
-
-      if (word === "using") {
-        matches.push({
-          type: "USING",
-          start: index,
-          end: wordEnd,
-        });
-        pendingModifier = "";
-        pendingModifierStart = -1;
-        index = wordEnd;
-        continue;
-      }
-
-      pendingModifier = "";
-      pendingModifierStart = -1;
-      index = wordEnd;
-      continue;
-    }
-
-    if (!/\s/.test(char)) {
-      pendingModifier = "";
-      pendingModifierStart = -1;
-    }
-
-    index += 1;
-  }
-
-  return matches;
-}
-
 function buildGraph({
   statementType,
   ctes,
@@ -4854,6 +4801,9 @@ function buildGraph({
     ...ctes.flatMap((cte) => cte.sources || []),
     ...graphSubqueries.flatMap((subquery) => subquery.sources || []),
   ]) {
+    if (source.type === "lateral_view") {
+      continue;
+    }
     const normalizedName = normalizeName(source.name);
 
     if (!sourceMetaByName.has(normalizedName)) {
@@ -4913,6 +4863,7 @@ function buildGraph({
         ranges: cteRanges,
         bodyRangeStart: cte.bodyRangeStart ?? null,
         bodyRangeEnd: cte.bodyRangeEnd ?? null,
+        joinRanges: extractClauseRanges(cte.body || "", cte.bodyRangeStart ?? 0).get("join")?.ranges || [],
         flowSequence: cte.flowSequence || [],
         statementType: cte.statementType || "",
       },
@@ -4920,6 +4871,9 @@ function buildGraph({
   }
 
   for (const source of statementSources) {
+    if (source.type === "lateral_view") {
+      continue;
+    }
     const normalizedName = normalizeName(source.name);
 
     if (cteNodeMap.has(normalizedName)) {
@@ -4980,6 +4934,13 @@ function buildGraph({
       meta: {
         sourceCount: subquery.sourceCount ?? subquery.sources?.length ?? 0,
         clauseCount: Object.values(subquery.clauses || {}).filter(Boolean).length,
+        flowSequence: buildFlowSequence(
+          subquery.statementType || "SELECT",
+          subquery.clauses || {},
+          [],
+          "",
+          resolvedSetOperator || "",
+        ),
         joinTypes: Array.isArray(subquery.joinTypes) ? subquery.joinTypes.filter(Boolean) : [],
         parentNodeId: subquery.parentNodeId || null,
         setOperator: resolvedSetOperator,
@@ -4992,6 +4953,9 @@ function buildGraph({
         rangeStart: subqueryRanges[0]?.start ?? subquery.rangeStart ?? null,
         rangeEnd: subqueryRanges[0]?.end ?? subquery.rangeEnd ?? null,
         ranges: subqueryRanges,
+        joinRanges: typeof subquery.bodyRangeStart === "number" && typeof subquery.bodyRangeEnd === "number"
+          ? extractClauseRanges(statementSql.slice(subquery.bodyRangeStart, subquery.bodyRangeEnd), subquery.bodyRangeStart).get("join")?.ranges || []
+          : [],
       },
     });
   }
@@ -5042,7 +5006,7 @@ function buildGraph({
         mergeActionKind: clauseConfig.mergeActionKind || "",
         rangeStart: clauseRange?.start ?? null,
         rangeEnd: clauseRange?.end ?? null,
-        ranges: clauseRange ? [{ start: clauseRange.start, end: clauseRange.end }] : [],
+        ranges: clauseRange?.ranges || [],
       },
     });
     edges.push({
@@ -5095,6 +5059,9 @@ function buildGraph({
     const targetNodeId = cteNodeMap.get(normalizeName(cte.name));
 
     for (const source of cte.sources) {
+      if (source.type === "lateral_view") {
+        continue;
+      }
       const sourceName = normalizeName(source.name);
 
       if (cteNodeMap.has(sourceName)) {
@@ -5146,7 +5113,7 @@ function buildGraph({
     if (skipDirectSources) {
       const parentNodeId =
         subqueryNodeMap.get(subquery.parentNodeId) ||
-        cteNodeMap.get(normalizeName(subquery.parentNodeId)) ||
+        cteNodeMap.get(normalizeName(String(subquery.parentNodeId || "").replace(/^cte:/, ""))) ||
         (subquery.parentNodeId === "statement:main" ? statementNodeId : null);
 
       if (parentNodeId) {
@@ -5162,6 +5129,9 @@ function buildGraph({
     }
 
     for (const [sourceIndex, source] of (subquery.sources || []).entries()) {
+      if (source.type === "lateral_view") {
+        continue;
+      }
       const sourceName = normalizeName(source.name);
 
       if (cteNodeMap.has(sourceName)) {
@@ -5237,7 +5207,7 @@ function buildGraph({
 
     const parentNodeId =
       subqueryNodeMap.get(subquery.parentNodeId) ||
-      cteNodeMap.get(normalizeName(subquery.parentNodeId)) ||
+      cteNodeMap.get(normalizeName(String(subquery.parentNodeId || "").replace(/^cte:/, ""))) ||
       (subquery.parentNodeId === "statement:main" ? statementNodeId : null);
 
     if (parentNodeId) {
@@ -5252,6 +5222,9 @@ function buildGraph({
   }
 
   for (const source of statementSources) {
+    if (source.type === "lateral_view") {
+      continue;
+    }
     const sourceName = normalizeName(source.name);
     const sourceNodeId = cteNodeMap.get(sourceName) || sourceNodeMap.get(sourceName);
 
@@ -5268,12 +5241,94 @@ function buildGraph({
     });
   }
 
+  const lateralColumns = [];
+  const cteNameSet = new Set(cteNodeMap.keys());
+  const scopes = [
+    { id: statementNodeId, sources: statementSources, sql: mainStatementSql, start: mainStatementStart },
+    ...ctes.map((cte) => ({
+      id: `cte:${cte.name}`,
+      sources: cte.sources,
+      sql: cte.body,
+      start: cte.bodyRangeStart,
+    })),
+    ...graphSubqueries.map((subquery) => ({
+      id: subquery.id,
+      sources: subquery.sources,
+      sql: statementSql.slice(subquery.rangeStart, subquery.rangeEnd),
+      start: subquery.rangeStart,
+    })),
+  ];
+  for (const scope of scopes) {
+    const branches = splitTopLevelSetBranches(scope.sql || "", scope.start || 0);
+    for (const source of (scope.sources || []).filter((entry) => entry.type === "lateral_view")) {
+      const nodeId = lateralViewNodeId(scope.id, source.rangeStart);
+      const branch = branches.find((entry) =>
+        source.rangeStart >= entry.rangeStart && source.rangeStart < entry.rangeEnd,
+      );
+      const branchSources = branches.length > 1 && branch
+        ? extractSources(branch.sql, branch.rangeStart)
+        : scope.sources || [];
+      const inputs = branchSources.filter((entry) => entry.rangeStart < source.rangeStart);
+      const aliasMap = buildHeuristicAliasMap(statementSql, inputs);
+      const upstream = uniqueColumnRefs(collectHeuristicColumnRefs(source.expressionSql || "").map((ref) =>
+        resolveHeuristicColumnRef(ref, inputs, aliasMap, cteNameSet, scope.id),
+      ));
+      nodes.push({
+        id: nodeId,
+        type: "lateral_view",
+        label: "LATERAL VIEW",
+        meta: {
+          sourceType: "lateral_view",
+          ownerNodeId: scope.id,
+          alias: source.alias,
+          rangeStart: source.rangeStart,
+          rangeEnd: source.rangeEnd,
+          ranges: source.ranges || [],
+        },
+      });
+      for (const ref of upstream) {
+        if (!nodes.some((node) => node.id === ref.sourceNodeId)) {
+          continue;
+        }
+        edges.push({
+          id: `edge:${ref.sourceNodeId}->${nodeId}`,
+          source: ref.sourceNodeId,
+          target: nodeId,
+          type: "reads_from",
+          sourceRole: "from",
+        });
+      }
+      edges.push({
+        id: `edge:${nodeId}->${scope.id}`,
+        source: nodeId,
+        target: scope.id,
+        type: "reads_from",
+        sourceRole: "lateral_view",
+      });
+      for (const [index, name] of (source.outputColumns || []).entries()) {
+        lateralColumns.push({
+          id: `${nodeId}:column:${index}:${name}`,
+          nodeId,
+          name,
+          label: name,
+          selectItemIndex: index,
+          role: "function",
+          expressionType: "heuristic",
+          expressionSql: source.expressionSql,
+          spans: source.ranges || [],
+          upstream,
+        });
+      }
+    }
+  }
+
   return {
     nodes: uniqueById(nodes),
     edges: uniqueById(edges),
     columns: [
       ...ctes.flatMap((cte) => cte.columns || []),
       ...(statementColumns || []),
+      ...lateralColumns,
     ],
   };
 }
@@ -5651,7 +5706,11 @@ function normalizeJoinTypeToken(value) {
     return "";
   }
 
-  if (normalized === "JOIN" || normalized === "USING") {
+  if (normalized === "JOIN") {
+    return "INNER";
+  }
+
+  if (normalized === "USING") {
     return normalized;
   }
 
@@ -5688,29 +5747,6 @@ function detectDistinctKind(sql) {
   return "";
 }
 
-function findMergeOnIndex(maskedSql) {
-  const mergePrefixMatch = /\bmerge\s+into\b[\s\S]*?\busing\b[\s\S]*?\bon\b/i.exec(maskedSql);
-
-  if (!mergePrefixMatch || typeof mergePrefixMatch.index !== "number") {
-    return -1;
-  }
-
-  const usingMatch = /\busing\b/i.exec(mergePrefixMatch[0]);
-
-  if (!usingMatch || typeof usingMatch.index !== "number") {
-    return -1;
-  }
-
-  const afterUsing = mergePrefixMatch[0].slice(usingMatch.index + usingMatch[0].length);
-  const onMatch = /\bon\b/i.exec(afterUsing);
-
-  if (!onMatch || typeof onMatch.index !== "number") {
-    return -1;
-  }
-
-  return mergePrefixMatch.index + usingMatch.index + usingMatch[0].length + onMatch.index;
-}
-
 function buildStatementTitle(index, rootStatementType, ctes, writes) {
   if (writes.length) {
     return `#${index + 1} ${rootStatementType} ${writes[0].name}`;
@@ -5728,7 +5764,9 @@ function mergeSourceMatches(items) {
   const merged = new Map();
 
   for (const item of items) {
-    const key = normalizeName(item.name);
+    const key = item.type === "lateral_view"
+      ? `lateral:${item.rangeStart}`
+      : normalizeName(item.name);
 
     if (!key) {
       continue;

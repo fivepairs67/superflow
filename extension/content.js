@@ -1,7 +1,10 @@
-if (globalThis.__SQV_CONTENT_SCRIPT_ACTIVE__) {
-  console.debug("Superset Query Visualizer content script already active");
-} else {
-globalThis.__SQV_CONTENT_SCRIPT_ACTIVE__ = true;
+{
+// A flag may survive an extension reload even though its runtime connection is dead.
+try {
+  globalThis.__SQV_CONTENT_SCRIPT_ACTIVE__?.dispose?.();
+} catch (_error) {
+  // Legacy observers may belong to an invalidated extension context.
+}
 
 const PAGE_SOURCE = "superset-query-visualizer";
 const STATUS_DEBOUNCE_MS = 200;
@@ -64,9 +67,18 @@ const RESULT_COUNT_REGEX = /^(\d[\d,]*)\s+rows?$/i;
 let lastUrl = window.location.href;
 let statusTimer = null;
 let bridgeReady = false;
+let bridgeVersion = 0;
 let bridgeSnapshot = null;
 let sqlLabSidebarHidden = false;
 let sidebarApplyFrame = null;
+let statusRequestId = 0;
+let disposed = false;
+let domObserver = null;
+let navigationTimer = null;
+let bitbucketHighlight = null;
+let bitbucketHighlightTimer = null;
+const controller = { dispose };
+globalThis.__SQV_CONTENT_SCRIPT_ACTIVE__ = controller;
 let networkSnapshotCache = {
   pageKey: "",
   snapshot: null,
@@ -81,10 +93,23 @@ injectPageBridge();
 scheduleStatusSync();
 observeDomChanges();
 observeNavigation();
+for (const name of ["selectionchange", "mouseup", "keyup"]) {
+  document.addEventListener(name, handleEditorSelectionChange);
+}
 
-window.addEventListener("message", (event) => {
+function handleEditorSelectionChange() {
+  if (isBitbucketSourcePage(window.location.href)) scheduleStatusSync();
+}
+
+function handlePageMessage(event) {
+  if (disposed) return;
   if (event.source !== window || !event.data || event.data.source !== PAGE_SOURCE) {
     return;
+  }
+  if (event.data.type === "BRIDGE_READY" || event.data.type === "SQL_SNAPSHOT") {
+    const version = Number(event.data.bridgeVersion) || 0;
+    if (version < bridgeVersion) return;
+    bridgeVersion = version;
   }
 
   if (event.data.type === "BRIDGE_READY") {
@@ -106,15 +131,22 @@ window.addEventListener("message", (event) => {
   }
 
   if (event.data.type === "SUPERSET_NETWORK_EVENT") {
-    void chrome.runtime.sendMessage({
+    void relayNetworkEvent({
       type: "SUPERSET_NETWORK_EVENT",
       event: event.data.payload,
     });
     scheduleStatusSync();
   }
-});
+}
+window.addEventListener("message", handlePageMessage);
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+function handleRuntimeMessage(message, _sender, sendResponse) {
+  if (disposed) return false;
+  if (message?.type === "REFRESH_SQL_OBSERVER") {
+    scheduleStatusSync();
+    sendResponse?.({ ok: true, observer: "superflow-content-v1" });
+    return false;
+  }
   if (message?.type === "SET_SQLLAB_SCHEMA_PANEL_HIDDEN") {
     try {
       sqlLabSidebarHidden = Boolean(message.hidden);
@@ -134,13 +166,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   try {
+    if (focusBitbucketSource(message)) {
+      sendResponse?.({ ok: true });
+      return false;
+    }
     injectPageBridge();
     window.postMessage(
       {
         target: `${PAGE_SOURCE}:page-bridge`,
-        type: "APPLY_EDITOR_HIGHLIGHT",
+        type: "APPLY_EDITOR_HIGHLIGHT_V2",
         payload: {
           ranges: Array.isArray(message.ranges) ? message.ranges : [],
+          sql: typeof message.sql === "string" ? message.sql : "",
         },
       },
       "*",
@@ -151,44 +188,83 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   return false;
-});
+}
+chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+
+async function relayNetworkEvent(message) {
+  try {
+    await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    if (/Extension context invalidated/i.test(String(error))) dispose();
+  }
+}
+
+function dispose() {
+  if (disposed) return;
+  disposed = true;
+  statusRequestId += 1;
+  domObserver?.disconnect();
+  clearBitbucketHighlight();
+  if (statusTimer !== null) window.clearTimeout(statusTimer);
+  if (navigationTimer !== null) window.clearInterval(navigationTimer);
+  if (sidebarApplyFrame !== null) window.cancelAnimationFrame(sidebarApplyFrame);
+  window.removeEventListener("message", handlePageMessage);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+  for (const name of ["selectionchange", "mouseup", "keyup"]) {
+    document.removeEventListener(name, handleEditorSelectionChange);
+  }
+  try {
+    chrome.runtime.onMessage.removeListener(handleRuntimeMessage);
+  } catch (_error) {
+    // Removing listeners can fail after Chrome invalidates the extension runtime.
+  }
+  if (globalThis.__SQV_CONTENT_SCRIPT_ACTIVE__ === controller) {
+    globalThis.__SQV_CONTENT_SCRIPT_ACTIVE__ = null;
+  }
+}
 
 function injectPageBridge() {
   // The bridge is injected by the background service worker into the page's MAIN world.
 }
 
 function observeDomChanges() {
-  const observer = new MutationObserver(() => {
+  domObserver = new MutationObserver(() => {
+    paintBitbucketHighlight();
     if (sqlLabSidebarHidden) {
       scheduleSidebarApply();
     }
 
     scheduleStatusSync();
   });
-  observer.observe(document.documentElement, {
+  domObserver.observe(document.documentElement, {
     childList: true,
     subtree: true,
   });
 }
 
 function observeNavigation() {
-  window.setInterval(() => {
+  navigationTimer = window.setInterval(() => {
     if (window.location.href === lastUrl) {
       return;
     }
 
     lastUrl = window.location.href;
+    bridgeSnapshot = null;
+    resetSnapshotStateForLocation();
     scheduleStatusSync();
   }, URL_POLL_MS);
 
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
-      scheduleStatusSync();
-    }
-  });
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "visible") {
+    scheduleStatusSync();
+  }
 }
 
 function scheduleStatusSync() {
+  if (disposed) return;
   if (statusTimer !== null) {
     window.clearTimeout(statusTimer);
   }
@@ -200,10 +276,17 @@ function scheduleStatusSync() {
 }
 
 async function sendPageStatus() {
+  if (disposed) return;
+  const requestId = ++statusRequestId;
+  const pageUrl = window.location.href;
+  resetSnapshotStateForLocation();
   const detection = detectSupersetSqlLab();
-  const networkSnapshot = await collectNetworkSqlSnapshot(window.location.href);
+  const networkSnapshot = withBitbucketSelection(await collectNetworkSqlSnapshot(pageUrl));
+  if (disposed || requestId !== statusRequestId || pageUrl !== window.location.href) {
+    return;
+  }
   const sqlSnapshot = stabilizeSqlSnapshot(
-    window.location.href,
+    pageUrl,
     pickBestSnapshot([networkSnapshot, bridgeSnapshot, collectDomSqlSnapshot()]),
   );
   const resultRowCount = collectDomResultCount();
@@ -211,7 +294,7 @@ async function sendPageStatus() {
   try {
     await chrome.runtime.sendMessage({
       type: "PAGE_STATUS_UPDATED",
-      url: window.location.href,
+      url: pageUrl,
       title: document.title,
       bridgeReady,
       hasSqlSnapshot: Boolean(sqlSnapshot?.sql),
@@ -230,6 +313,7 @@ async function sendPageStatus() {
       ...detection,
     });
   } catch (error) {
+    if (/Extension context invalidated/i.test(String(error))) dispose();
     console.debug("Unable to send page status update", error);
   }
 }
@@ -277,29 +361,24 @@ async function collectNetworkSqlSnapshot(url) {
     return networkSnapshotCache.inflight;
   }
 
+  const requestCache = { pageKey, snapshot: null, inflight: null };
   const inflight = fetchBitbucketRawSqlSnapshot(url)
     .then((snapshot) => {
-      networkSnapshotCache = {
-        pageKey,
-        snapshot,
-        inflight: null,
-      };
+      if (networkSnapshotCache === requestCache) {
+        requestCache.snapshot = snapshot;
+        requestCache.inflight = null;
+      }
       return snapshot;
     })
     .catch(() => {
-      networkSnapshotCache = {
-        pageKey,
-        snapshot: null,
-        inflight: null,
-      };
+      if (networkSnapshotCache === requestCache) {
+        requestCache.inflight = null;
+      }
       return null;
     });
 
-  networkSnapshotCache = {
-    pageKey,
-    snapshot: null,
-    inflight,
-  };
+  requestCache.inflight = inflight;
+  networkSnapshotCache = requestCache;
 
   return inflight;
 }
@@ -358,15 +437,20 @@ async function fetchBitbucketRawSqlSnapshot(url) {
       return null;
     }
 
-    const sql = normalizeSql(await response.text());
+    if (/text\/html/i.test(response.headers.get("content-type") || "")) {
+      return null;
+    }
+    const rawSql = (await response.text()).replace(/\r\n/g, "\n");
+    const sql = normalizeSql(rawSql);
 
-    if (!sql || !SQL_KEYWORD_REGEX.test(sql)) {
+    if (!sql || /^\s*(?:<!doctype\s+html|<html\b)/i.test(sql) || !SQL_KEYWORD_REGEX.test(sql)) {
       return null;
     }
 
     return {
       sql,
       source: "network:bitbucket:raw",
+      leadingLines: (rawSql.match(/^\s*/)?.[0].match(/\n/g) || []).length,
       isVisible: true,
       isFocused: true,
     };
@@ -375,12 +459,113 @@ async function fetchBitbucketRawSqlSnapshot(url) {
   }
 }
 
+function withBitbucketSelection(snapshot) {
+  if (!snapshot) return snapshot;
+  const input = document.querySelector(".monaco-editor textarea");
+  if (!input || document.activeElement !== input || typeof input.selectionStart !== "number") return snapshot;
+  const value = input.value || "";
+  const fragment = normalizeSql(value);
+  const index = snapshot.sql.indexOf(fragment);
+  // Monaco's accessibility textarea is only a window into the model. Map its
+  // context to the raw file, never use its local offsets as whole-file offsets.
+  if (fragment.length < 8 || index < 0 || snapshot.sql.indexOf(fragment, index + 1) >= 0) return snapshot;
+  const prefix = (value.match(/^\s*/)?.[0] || "").replace(/\r\n/g, "\n").length;
+  const offset = (position) => index + Math.max(0, Math.min(fragment.length,
+    value.slice(0, position).replace(/\r\n/g, "\n").length - prefix));
+  return {
+    ...snapshot,
+    selectedText: normalizeSql(value.slice(input.selectionStart, input.selectionEnd)),
+    selectionStart: offset(input.selectionStart),
+    selectionEnd: offset(input.selectionEnd),
+  };
+}
+
+function focusBitbucketSource(message) {
+  clearBitbucketHighlight();
+  if (!isBitbucketSourcePage(window.location.href) ||
+      networkSnapshotCache.pageKey !== buildPageKey(window.location.href)) return false;
+  const snapshot = networkSnapshotCache.snapshot;
+  const root = document.querySelector(".monaco-editor");
+  if (!snapshot || normalizeSql(message.sql) !== snapshot.sql ||
+      !root?.querySelector?.("a.line-number[data-line-num]")) return false;
+  const ranges = message.ranges?.filter((item) => Number.isInteger(item?.start) && item.start >= 0 &&
+    Number.isInteger(item?.end) && item.end > item.start && item.end <= snapshot.sql.length);
+  if (!ranges?.length) return false;
+  const lineAt = (offset) => snapshot.sql.slice(0, offset).split("\n").length + (snapshot.leadingLines || 0);
+  const lines = ranges.map((range) => ({ start: lineAt(range.start), end: lineAt(range.end - 1) }));
+  const viewport = root.querySelector(".editor-scrollable");
+  const bar = root.querySelector(".editor-scrollable > .scrollbar.vertical");
+  const slider = bar?.querySelector(".slider");
+  const lineHeight = parseFloat(root.querySelector(".view-line")?.style.height);
+  const contentHeight = parseFloat(root.querySelector(".view-lines")?.style.height);
+  if (!viewport || !bar || !slider || !Number.isFinite(lineHeight) || !Number.isFinite(contentHeight)) return false;
+  const track = bar.getBoundingClientRect();
+  const thumb = slider.getBoundingClientRect();
+  const viewportHeight = viewport.getBoundingClientRect().height;
+  const maxScroll = Math.max(0, contentHeight - viewportHeight);
+  if (viewportHeight <= 0 || track.height <= 0) return false;
+  bitbucketHighlight = { root, lines, pageKey: buildPageKey(window.location.href) };
+  ensureBitbucketHighlightStyle();
+  if (maxScroll > 0) {
+    const target = Math.max(0, Math.min(maxScroll, (lines[0].start - 1) * lineHeight - viewportHeight / 3));
+    const pointer = {
+      clientX: track.left + track.width / 2,
+      clientY: track.top + thumb.height / 2 + target / maxScroll * (track.height - thumb.height),
+    };
+    // Event overrides must be created in MAIN, where Monaco reads them.
+    // Expando properties on isolated-world DOM wrappers are not shared.
+    window.postMessage({
+      target: `${PAGE_SOURCE}:page-bridge`, type: "SCROLL_SOURCE_VIEW",
+      payload: { ...pointer, url: window.location.href },
+    }, "*");
+  }
+  bitbucketHighlightTimer = window.setTimeout(() => {
+    bitbucketHighlightTimer = null;
+    paintBitbucketHighlight();
+  }, 0);
+  return true;
+}
+
+function ensureBitbucketHighlightStyle() {
+  if (document.getElementById("sqv-bitbucket-highlight-style")) return;
+  const style = document.createElement("style");
+  style.id = "sqv-bitbucket-highlight-style";
+  style.textContent = ".sqv-bitbucket-highlight { background: rgba(97,122,145,.22) !important; box-shadow: inset 3px 0 rgba(97,122,145,.8); }";
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function clearBitbucketHighlight() {
+  if (bitbucketHighlightTimer !== null) window.clearTimeout(bitbucketHighlightTimer);
+  bitbucketHighlightTimer = null;
+  for (const line of bitbucketHighlight?.root.querySelectorAll(".sqv-bitbucket-highlight") || []) {
+    line.classList.remove("sqv-bitbucket-highlight");
+  }
+  bitbucketHighlight = null;
+}
+
+function paintBitbucketHighlight() {
+  if (!bitbucketHighlight || disposed) return;
+  if (bitbucketHighlight.pageKey !== buildPageKey(window.location.href)) {
+    clearBitbucketHighlight();
+    return;
+  }
+  const { root, lines } = bitbucketHighlight;
+  const numbers = new Map(Array.from(root.querySelectorAll("a.line-number[data-line-num]"), (anchor) => [
+    anchor.closest(".line-numbers")?.parentElement?.style.top,
+    Number(anchor.getAttribute("data-line-num")),
+  ]));
+  for (const line of root.querySelectorAll(".view-line")) {
+    const number = numbers.get(line.style.top);
+    line.classList.toggle("sqv-bitbucket-highlight", lines.some((range) => number >= range.start && number <= range.end));
+  }
+}
+
 function stabilizeSqlSnapshot(url, snapshot) {
   const pageKey = buildPageKey(url);
   const previous = stableSnapshotState.pageKey === pageKey ? stableSnapshotState.snapshot : null;
   let next = snapshot;
 
-  if (previous) {
+  if (previous && isBitbucketSourcePage(url)) {
     if (
       previous.source === "network:bitbucket:raw" &&
       snapshot?.source !== "network:bitbucket:raw"
@@ -1266,6 +1451,8 @@ function normalizeIncomingSnapshot(payload) {
   return {
     sql,
     source: payload.source || "bridge",
+    isVisible: Boolean(payload.isVisible),
+    isFocused: Boolean(payload.isFocused),
     selectedText: normalizeSql(payload.selectedText || ""),
     selectionStart:
       typeof payload.selectionStart === "number" ? payload.selectionStart : null,
@@ -1302,7 +1489,7 @@ function pickBestSnapshot(candidates) {
   }
 
   valid.sort((left, right) => right.score - left.score);
-  const selectedCandidate = valid.find((candidate) => candidate.selectedText);
+  const selectedCandidate = valid.find((candidate) => candidate.sql === valid[0].sql && candidate.selectedText);
 
   return {
     sql: valid[0].sql,
@@ -1328,6 +1515,9 @@ function scoreSnapshot(candidate, fallbackSource) {
   }
   if (source.startsWith("bridge:monaco")) {
     score += 1500;
+  }
+  if (/^bridge:monaco:(?!dom(?:$|:))/.test(source) || source === "bridge:ace:api") {
+    score += 20000;
   }
   if (source.startsWith("bridge:ace")) {
     score += 1800;

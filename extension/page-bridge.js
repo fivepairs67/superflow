@@ -49,13 +49,14 @@
   ];
   let lastSqlSignature = "";
   let activeAceMarkers = [];
+  let activeMonacoHighlight = null;
   let hasHighlightStyles = false;
-  let lastEditorHighlightSignature = "";
 
   function post(type, payload) {
     window.postMessage(
       {
         source: SOURCE,
+        bridgeVersion: 2,
         type,
         payload,
       },
@@ -305,6 +306,10 @@
     if (candidate.source.startsWith("bridge:monaco")) {
       score += 1500;
     }
+    if (/^bridge:monaco:(?!dom(?:$|:))/.test(candidate.source) || candidate.source === "bridge:ace:api") {
+      // A virtualized viewport must never outrank its complete editor model.
+      score += 20000;
+    }
     if (candidate.source.startsWith("bridge:ace")) {
       score += 1800;
     }
@@ -514,6 +519,11 @@
         box-shadow: inset 0 0 0 1px rgba(97, 122, 145, 0.18);
       }
 
+      .sqv-monaco-highlight {
+        background: rgba(97, 122, 145, 0.22);
+        box-shadow: inset 0 0 0 1px rgba(97, 122, 145, 0.45);
+      }
+
       .ace_editor .ace_cursor {
         color: #111827 !important;
         border-left-color: #111827 !important;
@@ -571,7 +581,7 @@
         const editor = window.ace.edit(editorRoot);
         const sql = normalizeSql(editor?.getValue?.());
 
-        if (!sql) {
+        if (!sql || !isElementVisible(editorRoot)) {
           continue;
         }
 
@@ -585,6 +595,8 @@
             selectedText: "",
             selectionStart: null,
             selectionEnd: null,
+            isVisible: true,
+            isFocused: isElementFocused(editorRoot),
           }),
         });
       } catch (_error) {
@@ -607,31 +619,80 @@
     activeAceMarkers = [];
   }
 
-  function applyEditorHighlight(ranges) {
+  function clearEditorHighlights() {
+    clearAceHighlights();
+    try {
+      activeMonacoHighlight?.clear();
+    } catch (_error) {
+      // The editor/model may have been disposed after switching worksheets.
+    }
+    activeMonacoHighlight = null;
+  }
+
+  function editorPosition(value, offset) {
+    const text = value.replace(/\r\n/g, "\n");
+    const prefix = text.match(/^\s*/)?.[0].length || 0;
+    return offsetToPosition(text, prefix + offset);
+  }
+
+  function normalizedOffset(value, offset) {
+    const text = value.replace(/\r\n/g, "\n");
+    const prefix = text.match(/^\s*/)?.[0].length || 0;
+    return Math.max(0, Math.min(normalizeSql(value).length,
+      value.slice(0, offset).replace(/\r\n/g, "\n").length - prefix));
+  }
+
+  function applyEditorHighlight(ranges, sql) {
     const validRanges = Array.isArray(ranges)
       ? ranges.filter(
           (range) =>
-            typeof range?.start === "number" &&
-            typeof range?.end === "number" &&
-            range.end >= range.start,
+            Number.isInteger(range?.start) && range.start >= 0 &&
+            Number.isInteger(range?.end) && range.end > range.start &&
+            range.end <= (sql?.length || 0),
         )
       : [];
-    const signature = validRanges
-      .map((range) => `${range.start}:${range.end}`)
-      .join("|");
-
-    if (signature === lastEditorHighlightSignature) {
-      return;
-    }
-
-    lastEditorHighlightSignature = signature;
-    clearAceHighlights();
+    clearEditorHighlights();
 
     if (!validRanges.length) {
       return;
     }
 
-    const targetEditor = collectAceEditors()[0];
+    const expectedSql = normalizeSql(sql);
+    try {
+      const editors = (window.monaco?.editor?.getEditors?.() || [])
+        .filter((editor) => isElementVisible(editor.getDomNode?.()) &&
+          normalizeSql(editor.getModel?.()?.getValue?.()) === expectedSql)
+        .sort((a, b) => Number(Boolean(b.hasTextFocus?.())) - Number(Boolean(a.hasTextFocus?.())));
+      const editor = editors[0];
+      if (editor) {
+        const value = editor.getModel().getValue();
+        const decorations = validRanges.map((range) => {
+          const start = editorPosition(value, range.start);
+          const end = editorPosition(value, range.end);
+          return {
+            range: { startLineNumber: start.row + 1, startColumn: start.column + 1,
+              endLineNumber: end.row + 1, endColumn: end.column + 1 },
+            options: { inlineClassName: "sqv-monaco-highlight" },
+          };
+        });
+        ensureHighlightStyles();
+        if (editor.createDecorationsCollection) {
+          activeMonacoHighlight = editor.createDecorationsCollection(decorations);
+        } else if (editor.deltaDecorations) {
+          const ids = editor.deltaDecorations([], decorations);
+          activeMonacoHighlight = { clear: () => editor.deltaDecorations(ids, []) };
+        } else {
+          return;
+        }
+        // Reveal without changing the user's selection or triggering focus feedback.
+        editor.revealRangeInCenter?.(decorations[0].range);
+        return;
+      }
+    } catch (_error) {
+      // Fall through when a site exposes only part of the Monaco API.
+    }
+
+    const targetEditor = collectAceEditors().find((candidate) => candidate.sql === expectedSql);
 
     if (!targetEditor?.editor || !targetEditor?.sql) {
       return;
@@ -658,8 +719,8 @@
     }
 
     for (const range of validRanges) {
-      const start = offsetToPosition(targetEditor.sql, range.start);
-      const end = offsetToPosition(targetEditor.sql, range.end);
+      const start = editorPosition(targetEditor.editor.getValue(), range.start);
+      const end = editorPosition(targetEditor.editor.getValue(), range.end);
       const markerId = session.addMarker(
         new RangeConstructor(start.row, start.column, end.row, end.column),
         EDITOR_HIGHLIGHT_CLASS,
@@ -674,8 +735,30 @@
     }
 
     const firstRange = validRanges[0];
-    const firstPosition = offsetToPosition(targetEditor.sql, firstRange.start);
+    const firstPosition = editorPosition(targetEditor.editor.getValue(), firstRange.start);
     targetEditor.editor.scrollToLine?.(firstPosition.row, true, true, () => {});
+  }
+
+  function scrollSourceView(payload) {
+    if (window.location.hostname !== "bitbucket.org" || payload?.url !== window.location.href ||
+        !Number.isFinite(payload.clientX) || !Number.isFinite(payload.clientY)) return;
+    const bar = document.querySelector(".monaco-editor .editor-scrollable > .scrollbar.vertical");
+    if (!bar) return;
+    const track = bar.getBoundingClientRect();
+    if (payload.clientX < track.left || payload.clientX > track.left + track.width ||
+        payload.clientY < track.top || payload.clientY > track.top + track.height) return;
+    const pointer = {
+      bubbles: true, cancelable: true, pointerType: "mouse", pointerId: 1, button: 0,
+      clientX: payload.clientX, clientY: payload.clientY,
+    };
+    const down = new PointerEvent("pointerdown", { ...pointer, buttons: 1 });
+    // Normalize zoom-sensitive native offsets in the editor's own JS world.
+    Object.defineProperties(down, {
+      offsetX: { value: payload.clientX - track.left },
+      offsetY: { value: payload.clientY - track.top },
+    });
+    bar.dispatchEvent(down);
+    bar.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 }));
   }
 
   function readAceSelection(editor, sql) {
@@ -693,8 +776,8 @@
 
       return {
         selectedText,
-        selectionStart: positionToOffset(sql, range.start.row, range.start.column),
-        selectionEnd: positionToOffset(sql, range.end.row, range.end.column),
+        selectionStart: normalizedOffset(editor.getValue(), positionToOffset(editor.getValue(), range.start.row, range.start.column)),
+        selectionEnd: normalizedOffset(editor.getValue(), positionToOffset(editor.getValue(), range.end.row, range.end.column)),
       };
     } catch (_error) {
       return {
@@ -782,33 +865,51 @@
     return candidates;
   }
 
-  function findBestSqlSnapshot() {
-    const candidates = [...collectAceSnapshots()];
-
-    if (window.monaco?.editor?.getModels) {
-      try {
-        for (const model of window.monaco.editor.getModels()) {
-          const sql = normalizeSql(model.getValue?.());
-
-          if (!sql) {
-            continue;
-          }
-
-          const languageId = model.getLanguageId?.() || "unknown";
-          candidates.push({
-            sql,
-            source: `bridge:monaco:${languageId}`,
-            selectedText: readDomSelectedText(),
-            selectionStart: null,
-            selectionEnd: null,
-            isVisible: false,
-            isFocused: false,
-          });
-        }
-      } catch (error) {
-        console.debug("Superset Query Visualizer: unable to inspect monaco models", error);
+  function collectMonacoSnapshots() {
+    const candidates = [];
+    const api = window.monaco?.editor;
+    if (!api?.getModels) return candidates;
+    try {
+      const editors = api.getEditors?.() || [];
+      const visibleEditors = editors.filter((editor) => isElementVisible(editor.getDomNode?.()));
+      const focusedEditors = visibleEditors.filter((editor) =>
+        editor.hasTextFocus?.() || isElementFocused(editor.getDomNode?.()),
+      );
+      const targets = (focusedEditors.length ? focusedEditors : visibleEditors)
+        .map((editor) => ({ model: editor.getModel?.(), editor }));
+      if (!editors.length) {
+        targets.push(...api.getModels().map((model) => ({ model, editor: null })));
       }
+      for (const { model, editor } of targets) {
+        if (!model || model.isDisposed?.()) continue;
+        const value = model.getValue?.() || "";
+        const sql = normalizeSql(value);
+        if (!sql) continue;
+        const range = editor?.getSelection?.();
+        const offset = (lineNumber, column) => {
+          const rawOffset = model.getOffsetAt({ lineNumber, column });
+          return Math.max(0, Math.min(sql.length,
+            value.slice(0, rawOffset).replace(/\r\n/g, "\n").length - (value.match(/^\s*/)?.[0].replace(/\r\n/g, "\n").length || 0),
+          ));
+        };
+        candidates.push({
+          sql,
+          source: `bridge:monaco:${model.getLanguageId?.() || "unknown"}`,
+          selectedText: range ? normalizeSelectedText(model.getValueInRange?.(range) || "") : "",
+          selectionStart: range && model.getOffsetAt ? offset(range.startLineNumber, range.startColumn) : null,
+          selectionEnd: range && model.getOffsetAt ? offset(range.endLineNumber, range.endColumn) : null,
+          isVisible: Boolean(editor && isElementVisible(editor.getDomNode?.())),
+          isFocused: Boolean(editor && (editor.hasTextFocus?.() || isElementFocused(editor.getDomNode?.()))),
+        });
+      }
+    } catch (error) {
+      console.debug("Superset Query Visualizer: unable to inspect monaco models", error);
     }
+    return candidates;
+  }
+
+  function findBestSqlSnapshot() {
+    const candidates = [...collectAceSnapshots(), ...collectMonacoSnapshots()];
 
     for (const element of queryAllBySelectors(DOM_SQL_SNAPSHOT_SELECTORS)) {
       const value =
@@ -854,6 +955,8 @@
     return {
       sql: primaryCandidate.sql,
       source: primaryCandidate.source,
+      isVisible: primaryCandidate.isVisible,
+      isFocused: primaryCandidate.isFocused,
       selectedText: selectedCandidate.selectedText || primaryCandidate.selectedText || "",
       selectionStart: selectedCandidate.selectionStart ?? primaryCandidate.selectionStart ?? null,
       selectionEnd: selectedCandidate.selectionEnd ?? primaryCandidate.selectionEnd ?? null,
@@ -1054,6 +1157,11 @@
   }
 
   function emitSqlSnapshotIfChanged() {
+    const current = window.__SQV_SQL_COLLECTOR__;
+    if (current && current.emit !== emitSqlSnapshotIfChanged) {
+      current.emit();
+      return;
+    }
     const snapshot = findBestSqlSnapshot();
     const signature = snapshot
       ? `${snapshot.source}:${snapshot.sql}:${snapshot.selectedText || ""}:${snapshot.selectionStart ?? ""}:${snapshot.selectionEnd ?? ""}`
@@ -1066,6 +1174,44 @@
     lastSqlSignature = signature;
     post("SQL_SNAPSHOT", snapshot);
   }
+
+  const previousCollector = window.__SQV_SQL_COLLECTOR__;
+  previousCollector?.clearHighlights?.();
+  window.__SQV_SQL_COLLECTOR__ = {
+    emit: emitSqlSnapshotIfChanged, applyHighlight: applyEditorHighlight,
+    clearHighlights: clearEditorHighlights,
+    scrollSource: scrollSourceView,
+  };
+  if (!window.__SQV_SOURCE_SCROLL_READY__) {
+    window.__SQV_SOURCE_SCROLL_READY__ = true;
+    window.addEventListener("message", (event) => {
+      if (event.source !== window || event.data?.target !== `${SOURCE}:page-bridge` ||
+          event.data.type !== "SCROLL_SOURCE_VIEW") return;
+      window.__SQV_SQL_COLLECTOR__.scrollSource(event.data.payload);
+    });
+  }
+  if (!window.__SQV_HIGHLIGHT_V2_READY__) {
+    window.__SQV_HIGHLIGHT_V2_READY__ = true;
+    window.addEventListener("message", (event) => {
+      if (event.source !== window || event.data?.target !== `${SOURCE}:page-bridge` ||
+          event.data.type !== "APPLY_EDITOR_HIGHLIGHT_V2") return;
+      window.__SQV_SQL_COLLECTOR__.applyHighlight(event.data.payload?.ranges || [], event.data.payload?.sql);
+    });
+  }
+  if (window.__SQV_BRIDGE_READY__) {
+    if (!previousCollector) {
+      // Upgrade a legacy bridge without reloading the page or losing unsaved SQL.
+      window.setInterval(() => window.__SQV_SQL_COLLECTOR__.emit(), SQL_COLLECT_INTERVAL_MS);
+    }
+    post("BRIDGE_READY", {
+      href: window.location.href,
+      title: document.title,
+      sqlSnapshot: findBestSqlSnapshot(),
+    });
+    return;
+  }
+
+  window.__SQV_BRIDGE_READY__ = true;
 
   const rawFetch = window.fetch;
   window.fetch = async function sqvFetch(input, init) {
@@ -1198,17 +1344,6 @@
     return rawSend.apply(this, arguments);
   };
 
-  if (window.__SQV_BRIDGE_READY__) {
-    post("BRIDGE_READY", {
-      href: window.location.href,
-      title: document.title,
-      sqlSnapshot: findBestSqlSnapshot(),
-    });
-    return;
-  }
-
-  window.__SQV_BRIDGE_READY__ = true;
-
   const rawPushState = history.pushState;
   const rawReplaceState = history.replaceState;
 
@@ -1260,20 +1395,6 @@
     },
     true,
   );
-
-  window.addEventListener("message", (event) => {
-    if (
-      event.source !== window ||
-      !event.data ||
-      event.data.target !== `${SOURCE}:page-bridge`
-    ) {
-      return;
-    }
-
-    if (event.data.type === "APPLY_EDITOR_HIGHLIGHT") {
-      applyEditorHighlight(event.data.payload?.ranges || []);
-    }
-  });
 
   window.setInterval(() => {
     emitSqlSnapshotIfChanged();

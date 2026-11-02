@@ -418,16 +418,18 @@ function shiftGraphNode(node: GraphNode, delta: number): GraphNode {
   const meta = node.meta || {};
   const nextMeta: Record<string, unknown> = { ...meta };
 
-  if (typeof meta.rangeStart === "number") {
-    nextMeta.rangeStart = meta.rangeStart + delta;
+  // Display-only JOIN nodes are created after grouping, from these body spans.
+  for (const field of ["rangeStart", "rangeEnd", "bodyRangeStart", "bodyRangeEnd"]) {
+    const value = meta[field];
+    if (typeof value === "number") {
+      nextMeta[field] = value + delta;
+    }
   }
 
-  if (typeof meta.rangeEnd === "number") {
-    nextMeta.rangeEnd = meta.rangeEnd + delta;
-  }
-
-  if (Array.isArray(meta.ranges)) {
-    nextMeta.ranges = shiftRanges(meta.ranges as AnalysisRange[], delta);
+  for (const field of ["ranges", "joinRanges"]) {
+    if (Array.isArray(meta[field])) {
+      nextMeta[field] = shiftRanges(meta[field] as AnalysisRange[], delta);
+    }
   }
 
   return {

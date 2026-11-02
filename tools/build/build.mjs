@@ -78,7 +78,11 @@ async function writeStaticFiles() {
   await Promise.all([
     writeFile(path.join(outDir, "manifest.json"), manifest),
     writeFile(path.join(outDir, "sidepanel.html"), sidepanelHtml),
-    cp(assetsDir, path.join(outDir, "assets"), { recursive: true, force: true }).catch(() => {}),
+    cp(assetsDir, path.join(outDir, "assets"), {
+      recursive: true,
+      force: true,
+      filter: (source) => !source.endsWith("_source.html"),
+    }),
     cp(iconsDir, path.join(outDir, "icons"), { recursive: true, force: true }).catch(() => {}),
   ]);
 }

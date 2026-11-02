@@ -1,16 +1,17 @@
 import { Fragment, useMemo } from "react";
 
-import type { AnalysisStatement, GraphColumn, GraphNode, TabSession } from "../../../shared/types";
+import type { AnalysisStatement, GraphColumn, GraphNode, QueryGraph, TabSession } from "../../../shared/types";
 import { useGraphStore } from "../../state/graph-store";
 import {
-  getNodeSpans,
   normalizeGraphSpans,
   type GraphSpan,
 } from "../../features/graph/spans";
+import { resolveGraphSelection } from "../../features/graph/selection";
 
 interface SqlSnapshotProps {
   session: TabSession | null;
   statement: AnalysisStatement | null | undefined;
+  graph: QueryGraph;
   selectedNodeId: string | null;
   selectedColumnId: string | null;
 }
@@ -18,22 +19,15 @@ interface SqlSnapshotProps {
 export function SqlSnapshot({
   session,
   statement,
+  graph,
   selectedNodeId,
   selectedColumnId,
 }: SqlSnapshotProps) {
   const { selectNode } = useGraphStore();
   const sql = statement?.sql || session?.activeSql || session?.sql || session?.sqlPreview || "";
-  const selectedNode = statement?.graph?.nodes?.find((node) => node.id === selectedNodeId) || null;
-  const selectedColumn =
-    statement?.graph?.columns?.find((column) => column.id === selectedColumnId) || null;
-  const nodeHighlightRanges = useMemo(
-    () =>
-      normalizeRanges(
-        selectedColumn?.spans?.length ? selectedColumn.spans : getNodeSpans(selectedNode),
-        sql.length,
-      ),
-    [selectedColumn?.spans, selectedNode, sql.length],
-  );
+  const selection = resolveGraphSelection(graph, selectedNodeId, selectedColumnId);
+  const { node: selectedNode, column: selectedColumn } = selection;
+  const nodeHighlightRanges = normalizeRanges(selection.ranges, sql.length);
   const editorSelectionRanges = useMemo(
     () => buildEditorSelectionRanges(statement, session, sql.length),
     [session, sql.length, statement],
@@ -67,11 +61,11 @@ export function SqlSnapshot({
         onMouseUp={() => {
           const selectedText = window.getSelection?.()?.toString().trim();
 
-          if (!selectedText || !statement?.graph?.nodes?.length) {
+          if (!selectedText || !graph.nodes.length) {
             return;
           }
 
-          const matchedNode = matchNodeFromText(statement.graph.nodes, selectedText);
+          const matchedNode = matchNodeFromText(graph.nodes, selectedText);
 
           if (matchedNode) {
             selectNode(matchedNode.id);

@@ -92,19 +92,22 @@ export function InputCaptureControls({ tabId, session }: InputCaptureControlsPro
       return;
     }
 
+    let sql: string;
     try {
-      const text = await navigator.clipboard.readText();
-      const sql = normalizeSql(text);
-
-      if (!isLikelySql(sql)) {
-        setFeedback("Clipboard has no SQL");
-        return;
-      }
-
+      sql = normalizeSql(await navigator.clipboard.readText());
+    } catch (_error) {
+      setFeedback("Clipboard unavailable");
+      return;
+    }
+    if (!isLikelySql(sql)) {
+      setFeedback("Clipboard has no SQL");
+      return;
+    }
+    try {
       await captureSql(sql, "capture:clipboard");
       setFeedback("");
     } catch (_error) {
-      setFeedback("Clipboard unavailable");
+      setFeedback("Analysis failed. Please try again.");
     }
   }
 
@@ -121,19 +124,26 @@ export function InputCaptureControls({ tabId, session }: InputCaptureControlsPro
       return;
     }
 
-    await captureSql(sql, "capture:manual");
-    setManualOpen(false);
-    setManualSql("");
-    setFeedback("");
+    try {
+      await captureSql(sql, "capture:manual");
+      setManualOpen(false);
+      setManualSql("");
+      setFeedback("");
+    } catch (_error) {
+      setFeedback("Analysis failed. Please try again.");
+    }
   }
 
   async function captureSql(sql: string, source: string) {
-    await chrome.runtime.sendMessage({
+    const response = await chrome.runtime.sendMessage({
       type: "CAPTURE_SELECTION_SQL",
       tabId,
       sql,
       source,
     });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not analyze SQL");
+    }
   }
 
   async function handleClearCaptured() {
@@ -142,13 +152,16 @@ export function InputCaptureControls({ tabId, session }: InputCaptureControlsPro
     }
 
     try {
-      await chrome.runtime.sendMessage({
+      const response = await chrome.runtime.sendMessage({
         type: "CLEAR_CAPTURED_SQL",
         tabId,
       });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Could not return to page SQL");
+      }
       setFeedback("");
     } catch (_error) {
-      // noop
+      setFeedback("Could not return to page SQL");
     }
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { AnalysisResult, AnalysisRange, AnalysisStatement } from "../shared/types";
 import { PanelLayout } from "./app/layout";
@@ -11,7 +11,8 @@ import { DialectControls } from "./components/sql/DialectControls";
 import { InputCaptureControls } from "./components/sql/InputCaptureControls";
 import { StatementOutline } from "./components/sql/StatementOutline";
 import { SqlSnapshot } from "./components/sql/SqlSnapshot";
-import { getNodeSpans, normalizeGraphSpans } from "./features/graph/spans";
+import { buildLogicalDisplayGraph } from "./features/graph/display-graph";
+import { buildEditorHighlightRanges } from "./features/graph/selection";
 import {
   buildStatementGroupStatement,
   findStatementDisplayGroup,
@@ -30,6 +31,7 @@ export function App() {
 function AppContent() {
   const { session, error, tabId } = useTabSession();
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
+  const [compactMode, setCompactMode] = useState(false);
   const [schemaTogglePending, setSchemaTogglePending] = useState(false);
   const [siteAccessPending, setSiteAccessPending] = useState(false);
   const {
@@ -40,6 +42,10 @@ function AppContent() {
     viewMode,
   } = useGraphStore();
   const activeStatement = getActiveStatement(session?.analysis, selectedStatementIndex);
+  const displayGraph = useMemo(
+    () => buildLogicalDisplayGraph(activeStatement?.graph, compactMode, selectedNodeId),
+    [activeStatement?.graph, compactMode, selectedNodeId],
+  );
   const lastHighlightSignatureRef = useRef("");
 
   useEffect(() => {
@@ -50,10 +56,11 @@ function AppContent() {
     }
 
     const ranges =
-      selectionSource === "panel"
-        ? buildEditorHighlightRanges(activeStatement, selectedNodeId, selectedColumnId)
+      selectionSource === "panel" && session?.analysisInputMode === "page" && session?.siteAccessGranted
+        ? buildEditorHighlightRanges(activeStatement, displayGraph, selectedNodeId, selectedColumnId)
         : [];
-    const signature = buildHighlightSignature(tabId, ranges);
+    const sql = session?.activeSql || session?.sql || "";
+    const signature = `${buildHighlightSignature(tabId, ranges)}:${sql}`;
 
     if (signature === lastHighlightSignatureRef.current) {
       return;
@@ -65,11 +72,12 @@ function AppContent() {
       .sendMessage(tabId, {
         type: "APPLY_EDITOR_HIGHLIGHT",
         ranges,
+        sql,
       })
       .catch(() => {
         // Content script might not be ready yet.
       });
-  }, [activeStatement, selectedColumnId, selectedNodeId, selectionSource, session?.tabId]);
+  }, [activeStatement, displayGraph, selectedColumnId, selectedNodeId, selectionSource, session?.tabId, session?.analysisInputMode, session?.siteAccessGranted, session?.activeSql, session?.sql]);
 
   return (
     <PanelLayout>
@@ -133,6 +141,9 @@ function AppContent() {
         <GraphCanvas
           analysis={session?.analysis}
           statement={activeStatement}
+          logicalGraph={displayGraph}
+          compactMode={compactMode}
+          onToggleCompact={() => setCompactMode((current) => !current)}
           execution={session?.execution}
           isSqlLab={Boolean(session?.isSqlLab)}
           sqlSelectionText={session?.sqlSelectionText}
@@ -146,6 +157,7 @@ function AppContent() {
         <SqlSnapshot
           session={session}
           statement={activeStatement}
+          graph={displayGraph}
           selectedNodeId={selectedNodeId}
           selectedColumnId={selectedColumnId}
         />
@@ -228,37 +240,6 @@ function buildHighlightSignature(tabId: number, ranges: AnalysisRange[]) {
   return `${tabId}:${ranges.map((range) => `${range.start}-${range.end}`).join("|")}`;
 }
 
-function buildEditorHighlightRanges(
-  statement: AnalysisStatement | null,
-  selectedNodeId: string | null,
-  selectedColumnId: string | null,
-): AnalysisRange[] {
-  if (!statement || typeof statement.rangeStart !== "number") {
-    return [];
-  }
-
-  const baseOffset = statement.rangeStart;
-  const selectedColumn =
-    selectedColumnId && statement.graph?.columns?.length
-      ? statement.graph.columns.find((column) => column.id === selectedColumnId) || null
-      : null;
-
-  const localRanges =
-    selectedColumn?.spans?.length
-      ? selectedColumn.spans
-      : selectedNodeId
-        ? getNodeSpans(
-            statement.graph?.nodes?.find((node) => node.id === selectedNodeId) || null,
-          )
-        : [];
-
-  return normalizeGraphSpans(localRanges)
-    .map((range) => ({
-      start: baseOffset + range.start,
-      end: baseOffset + range.end,
-    }))
-    .filter((range) => range.end >= range.start);
-}
 
 function getActiveStatement(
   analysis: AnalysisResult | null | undefined,

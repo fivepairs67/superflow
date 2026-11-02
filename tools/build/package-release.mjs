@@ -1,35 +1,41 @@
-import { cp, mkdir, rm, readFile } from "node:fs/promises";
+import { cp, mkdir, rm, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const rootDir = path.resolve(process.cwd());
-const distDir = path.join(rootDir, "dist");
-const extensionDir = path.join(distDir, "extension");
-const releaseDir = path.join(distDir, "release");
+export async function packageRelease(rootDir = process.cwd()) {
+  const extensionDir = path.resolve(rootDir, "dist", "extension");
+  const releaseDir = path.resolve(rootDir, "dist", "release");
+  const packageJson = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
+  const manifest = JSON.parse(await readFile(path.join(extensionDir, "manifest.json"), "utf8"));
+  const version = packageJson.version;
+  if (!/^\d+\.\d+\.\d+$/.test(version) || manifest.version !== version) {
+    throw new Error("Package and built manifest versions must match. Rebuild the extension first.");
+  }
+  const releaseFolderName = `superflow-extension-v${version}`;
+  const stagedDir = path.join(releaseDir, releaseFolderName);
+  const githubZipPath = path.join(releaseDir, `${releaseFolderName}.zip`);
+  const storeZipPath = path.join(releaseDir, `superflow-chrome-store-v${version}.zip`);
 
-const packageJson = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
-const version = packageJson.version;
-const releaseFolderName = `superflow-extension-v${version}`;
-const stagedDir = path.join(releaseDir, releaseFolderName);
-const zipPath = path.join(releaseDir, `${releaseFolderName}.zip`);
+  await mkdir(releaseDir, { recursive: true });
+  await rm(stagedDir, { recursive: true, force: true });
+  await cp(extensionDir, stagedDir, { recursive: true });
+  await rm(githubZipPath, { force: true });
+  await rm(storeZipPath, { force: true });
+  await runPythonZip(githubZipPath, [releaseFolderName], releaseDir);
+  // The Web Store requires manifest.json at the archive root, unlike the GitHub download.
+  await runPythonZip(storeZipPath, (await readdir(stagedDir)).sort(), stagedDir);
+  return { githubZipPath, storeZipPath };
+}
 
-await rm(stagedDir, { recursive: true, force: true });
-await rm(zipPath, { force: true });
-await mkdir(releaseDir, { recursive: true });
-await cp(extensionDir, stagedDir, { recursive: true });
-
-await runPythonZip();
-
-console.log(`Built release archive -> ${zipPath}`);
-
-function runPythonZip() {
+function runPythonZip(zipPath, files, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "python3",
-      ["-m", "zipfile", "-c", zipPath, releaseFolderName],
+      ["-m", "zipfile", "-c", zipPath, ...files],
       {
-        cwd: releaseDir,
+        cwd,
         stdio: "inherit",
       },
     );
@@ -47,4 +53,10 @@ function runPythonZip() {
       reject(new Error(`Release packaging failed with exit code ${code}`));
     });
   });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const archives = await packageRelease();
+  console.log(`GitHub download -> ${archives.githubZipPath}`);
+  console.log(`Chrome Web Store upload -> ${archives.storeZipPath}`);
 }

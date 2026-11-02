@@ -61,7 +61,7 @@ export function normalizeGraphSpans(spans: GraphSpan[]) {
 
     const previous = merged[merged.length - 1];
 
-    if (range.start <= previous.end + 1) {
+    if (range.start <= previous.end) {
       previous.end = Math.max(previous.end, range.end);
       continue;
     }
@@ -125,7 +125,7 @@ export function findNarrowestNodeByRange(
 
 function rangeContainsSelection(span: GraphSpan, selectionStart: number, selectionEnd: number) {
   if (selectionStart === selectionEnd) {
-    return selectionStart >= span.start && selectionStart <= span.end;
+    return selectionStart >= span.start && selectionStart < span.end;
   }
 
   return selectionStart >= span.start && selectionEnd <= span.end;
@@ -133,7 +133,7 @@ function rangeContainsSelection(span: GraphSpan, selectionStart: number, selecti
 
 function rangeIntersectsSelection(span: GraphSpan, selectionStart: number, selectionEnd: number) {
   if (selectionStart === selectionEnd) {
-    return selectionStart >= span.start && selectionStart <= span.end;
+    return selectionStart >= span.start && selectionStart < span.end;
   }
 
   return selectionStart < span.end && selectionEnd > span.start;
@@ -141,7 +141,7 @@ function rangeIntersectsSelection(span: GraphSpan, selectionStart: number, selec
 
 function computeOverlapWidth(span: GraphSpan, selectionStart: number, selectionEnd: number) {
   if (selectionStart === selectionEnd) {
-    return selectionStart >= span.start && selectionStart <= span.end ? 1 : 0;
+    return selectionStart >= span.start && selectionStart < span.end ? 1 : 0;
   }
 
   return Math.max(0, Math.min(span.end, selectionEnd) - Math.max(span.start, selectionStart));

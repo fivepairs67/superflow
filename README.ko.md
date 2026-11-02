@@ -19,6 +19,16 @@ SuperFLOW는 단순한 Superset 전용 부가기능이 아닙니다.
 
 가장 강력한 경험은 Superset SQL Lab에서 제공합니다.
 
+## 설치하고 시작하기
+
+[Chrome 웹 스토어에서 SuperFLOW 설치](https://chromewebstore.google.com/detail/superflow/jndkmgobfdidhgcmkakkdjdgamchgbij) 후 도구 모음에 고정하면 편리합니다. 스토어 버전은 개발자 모드를 켤 필요가 없습니다.
+
+1. SQL 편집기가 있는 탭에서 SuperFLOW 버튼을 누릅니다.
+2. `Enable Site`로 해당 사이트 접근을 허용하고, 그래프 노드를 눌러 SQL과 컬럼을 살펴봅니다.
+3. 자동 수집이 안 되면 `Paste SQL`에 붙여넣고 `Analyze paste`를 누릅니다. 붙여넣기에는 사이트 접근 권한이 필요하지 않습니다.
+
+SQL 분석은 브라우저 안에서 처리하며 개발자 서버나 AI 서비스로 SQL을 보내지 않습니다. SQL 실행이나 데이터베이스 접속도 하지 않습니다. 자세한 내용은 [개인정보처리방침](./PRIVACY.md)을 참고하세요.
+
 ## 어떤 이점이 있나
 
 - 길고 복잡한 SQL을 source, CTE, join, filter, subquery, output 흐름으로 파악할 수 있습니다.
@@ -42,7 +52,7 @@ SuperFLOW는 단순한 Superset 전용 부가기능이 아닙니다.
 - `Superset SQL Lab`
   가장 강한 모드입니다. editor focus를 그래프로 따라가고, 그래프 focus를 다시 editor로 밀어넣고, worksheet 구조를 더 정확히 읽으며, schema panel 같은 SQL Lab 전용 레이아웃까지 제어할 수 있습니다.
 - `그 외 웹 기반 SQL 에디터`
-  best-effort 지원입니다. 사이트가 editor 상태를 읽을 수 있게 노출하면 read-first 방식으로 그래프를 표시할 수 있지만, 실제 동작 범위는 그 사이트의 editor 구현 방식과 DOM/runtime 노출 정도에 따라 달라집니다.
+  Bitbucket SQL 파일 화면과 OneCompiler 등을 best-effort로 지원합니다. 사이트가 편집기 상태를 노출하는 방식에 따라 수집과 포커싱 범위가 달라지며, 사이트나 편집기 버전이 바뀌면 동작이 달라질 수 있습니다.
 - `Clipboard / Paste`
   가장 범용적인 fallback입니다. 사이트가 editor 상태를 잘 노출하지 않아도 SQL을 분석할 수 있습니다.
 
@@ -50,11 +60,13 @@ SuperFLOW는 단순한 Superset 전용 부가기능이 아닙니다.
 
 SuperFLOW는 현재 탭 중심으로 사용하는 제품입니다.
 
-1. 분석하고 싶은 SQL 에디터 탭에서 side panel을 엽니다.
+1. 분석하고 싶은 SQL 에디터 탭에서 도구 모음의 SuperFLOW 버튼을 누릅니다.
 2. 아직 허용하지 않은 사이트라면 `Enable Site`를 한 번 클릭합니다.
 3. 그 뒤에는 같은 사이트에서 추가 허용 없이 계속 사용할 수 있고, 헤더에는 `Site Access On` 상태가 표시됩니다.
 4. 나중에 현재 사이트 접근을 끄고 싶다면 `Site Access On` 버튼을 다시 누르면 됩니다.
 5. 사이트가 editor 상태를 충분히 노출하지 않는다면 `Clipboard` 또는 `Paste SQL`로 전환합니다.
+
+패널은 버튼을 누른 탭에만 연결됩니다. 다른 탭이나 Chrome 창에서는 자동으로 열리지 않으며, 필요할 때 해당 탭에서 버튼을 누르면 됩니다. 사이트 접근 권한은 같은 사이트에서 공유하지만 SQL 분석 세션은 탭별로 분리됩니다.
 
 즉 SuperFLOW는 모든 웹 기반 SQL 에디터에서 동일한 수준의 통합을 보장하지는 않습니다. 기준이 되는 경험은 Superset SQL Lab이고, 다른 사이트는 의도적으로 read-first, best-effort 계층으로 지원합니다.
 
@@ -96,6 +108,9 @@ SuperFLOW는 강한 베타 단계의 MVP입니다.
 ```bash
 npm install
 npm run typecheck
+npm run test:runtime
+npm run test:parser-fixtures
+npm run test:release
 npm run build:extension
 ```
 
@@ -125,13 +140,21 @@ npm run build:release
 
 생성 결과:
 - `dist/release/superflow-extension-vX.Y.Z.zip`
+- `dist/release/superflow-chrome-store-vX.Y.Z.zip`
 
-이 zip 파일을 GitHub Release asset으로 올리면 됩니다. 리포지토리에는 source code만 유지합니다.
+첫 번째 ZIP은 GitHub Release 배포용, 두 번째 ZIP은 Chrome 웹 스토어 제출용입니다. 스토어용은 `manifest.json`이 압축파일 최상위에 위치합니다. 빌드 산출물과 ZIP은 Git에 커밋하지 않습니다.
+
+## 문의와 한계
+
+SuperFLOW는 SQL 이해를 돕는 베타 도구이며, 실행 계획이나 쿼리 정확성을 보장하는 검증기는 아닙니다. 지원하지 않는 문법은 휴리스틱 분석으로 전환될 수 있고, 스키마 정보가 없는 컬럼 lineage는 불완전할 수 있습니다. 수정 전 원문을 확인하세요.
+
+문제는 [GitHub Issues](https://github.com/fivepairs67/superflow/issues)에 확장 버전, Chrome 버전, 사이트/편집기 종류, SQL 방언, 최소 재현용 가상 SQL과 함께 남겨주세요. 인증 정보, 회사 테이블명, 내부 주소, 기밀 SQL은 포함하지 마세요.
 
 ## 문서
 
 - [작업 체크리스트](./TASKS.md)
 - [GitHub 공개 체크리스트](./docs/GITHUB_RELEASE_CHECKLIST.md)
+- [Chrome 웹 스토어 제출 안내](./docs/store/SUBMISSION.md)
 - [설계 문서](./docs/DESIGN.md)
 - [React 재설계](./docs/REACT_REDESIGN.md)
 - [Column Lineage 계획](./docs/COLUMN_LINEAGE_PLAN.md)

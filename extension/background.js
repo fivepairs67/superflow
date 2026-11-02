@@ -1,42 +1,32 @@
 import { analyzeSql } from "./sql-analysis.js";
+import { registerSidePanelController } from "./sidepanel-controller.js";
 
-const PANEL_PATH = "sidepanel.html";
 const SESSION_PREFIX = "tab:";
 const ORIGIN_PREF_PREFIX = "origin-pref:";
 const EXECUTION_EVENT_LIMIT = 12;
 const SESSION_WAIT_TIMEOUT_MS = 1200;
 const SESSION_WAIT_STEP_MS = 120;
+const tabUpdates = new Map();
 
-chrome.runtime.onInstalled.addListener(async () => {
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  await refreshSidePanelAvailability();
-});
+registerSidePanelController(chrome);
 
-chrome.runtime.onStartup.addListener(() => {
-  void refreshSidePanelAvailability();
-});
-
-chrome.tabs.onActivated.addListener(({ tabId }) => {
-  void syncSidePanelForTab(tabId);
-});
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (typeof changeInfo.url === "string") {
-    void clearTabSession(tabId);
-  }
-
-  if (typeof changeInfo.url === "string" || changeInfo.status === "loading" || changeInfo.status === "complete") {
-    void syncSidePanelForTab(tabId, tab);
+    void queueTabUpdate(tabId, async () => {
+      const session = await getTabSession(tabId);
+      if (session?.url && isSameDocumentUrl(session.url, changeInfo.url)) return;
+      await clearTabSession(tabId);
+    });
   }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  void clearTabSession(tabId);
+  void queueTabUpdate(tabId, () => clearTabSession(tabId));
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "PAGE_STATUS_UPDATED") {
-    void handlePageStatusUpdated(message, sender).then(
+    void queueTabUpdate(sender.tab?.id, () => handlePageStatusUpdated(message, sender)).then(
       (session) => sendResponse({ ok: true, session }),
       (error) => {
         console.error("Failed to update page status", error);
@@ -60,7 +50,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "SUPERSET_NETWORK_EVENT") {
-    void handleNetworkEvent(message, sender).then(
+    void queueTabUpdate(sender.tab?.id, () => handleNetworkEvent(message, sender)).then(
       (session) => sendResponse({ ok: true, session }),
       (error) => {
         console.error("Failed to handle network event", error);
@@ -72,7 +62,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "SET_ANALYSIS_DIALECT") {
-    void handleSetAnalysisDialect(message).then(
+    void queueTabUpdate(message.tabId, () => handleSetAnalysisDialect(message)).then(
       (session) => sendResponse({ ok: true, session }),
       (error) => {
         console.error("Failed to update analysis dialect", error);
@@ -84,7 +74,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "CAPTURE_SELECTION_SQL") {
-    void handleCaptureSelectionSql(message, sender).then(
+    void queueTabUpdate(sender.tab?.id ?? message.tabId, () => handleCaptureSelectionSql(message, sender)).then(
       (session) => sendResponse({ ok: true, session }),
       (error) => {
         console.error("Failed to capture selection SQL", error);
@@ -96,7 +86,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "CLEAR_CAPTURED_SQL") {
-    void handleClearCapturedSql(message).then(
+    void queueTabUpdate(message.tabId, () => handleClearCapturedSql(message)).then(
       (session) => sendResponse({ ok: true, session }),
       (error) => {
         console.error("Failed to clear captured SQL", error);
@@ -153,8 +143,13 @@ async function handlePageStatusUpdated(message, sender) {
     throw new Error("Missing tab id");
   }
 
+  const currentTab = await chrome.tabs.get(tabId);
+  if ((message.url && !isSameDocumentUrl(message.url, currentTab.url)) ||
+      (sender.url && !isSameDocumentUrl(sender.url, currentTab.url))) {
+    return getTabSession(tabId);
+  }
   const previous = await getTabSession(tabId);
-  const resolvedUrl = sender.tab?.url ?? message.url ?? previous?.url ?? "";
+  const resolvedUrl = currentTab.url ?? message.url ?? previous?.url ?? "";
   const sqlLabSidebarHidden = await getSqlLabSidebarHiddenPreference(resolvedUrl);
   const next = {
     ...previous,
@@ -217,11 +212,10 @@ async function handlePageStatusUpdated(message, sender) {
 
   await applySiteAccessState(next, resolvedUrl);
 
-  if (!next.siteAccessGranted && !normalizeSql(next.capturedSql)) {
+  if (!next.siteAccessGranted) {
     const tab = sender.tab || (await chrome.tabs.get(tabId).catch(() => null));
     const fallback = buildTabAccessSession(tab, next, false);
     await chrome.storage.session.set({ [sessionKey(tabId)]: fallback });
-    await updateSidePanelForTab(tabId, shouldEnableSidePanel(fallback));
     notifySessionUpdated(fallback);
     return fallback;
   }
@@ -257,7 +251,6 @@ async function handlePageStatusUpdated(message, sender) {
   );
 
   await chrome.storage.session.set({ [sessionKey(tabId)]: next });
-  await updateSidePanelForTab(tabId, shouldEnableSidePanel(next));
   if (Boolean(message.sqlLabSidebarHidden) !== sqlLabSidebarHidden) {
     await sendSqlLabSidebarHiddenToTab(tabId, sqlLabSidebarHidden);
   }
@@ -273,9 +266,13 @@ async function handleNetworkEvent(message, sender) {
     throw new Error("Missing tab id");
   }
 
+  const currentTab = await chrome.tabs.get(tabId);
+  if (sender.url && !isSameDocumentUrl(sender.url, currentTab.url)) {
+    return getTabSession(tabId);
+  }
   const previous = await getTabSession(tabId);
   const event = normalizeNetworkEvent(message.event);
-  const resolvedUrl = sender.tab?.url ?? previous?.url ?? "";
+  const resolvedUrl = currentTab.url ?? previous?.url ?? "";
   const sqlLabSidebarHidden = await getSqlLabSidebarHiddenPreference(resolvedUrl);
   const next = {
     ...previous,
@@ -299,11 +296,10 @@ async function handleNetworkEvent(message, sender) {
 
   await applySiteAccessState(next, resolvedUrl);
 
-  if (!next.siteAccessGranted && !normalizeSql(next.capturedSql)) {
+  if (!next.siteAccessGranted) {
     const tab = sender.tab || (await chrome.tabs.get(tabId).catch(() => null));
     const fallback = buildTabAccessSession(tab, next, false);
     await chrome.storage.session.set({ [sessionKey(tabId)]: fallback });
-    await updateSidePanelForTab(tabId, shouldEnableSidePanel(fallback));
     notifySessionUpdated(fallback);
     return fallback;
   }
@@ -328,7 +324,6 @@ async function handleNetworkEvent(message, sender) {
   );
 
   await chrome.storage.session.set({ [sessionKey(tabId)]: next });
-  await updateSidePanelForTab(tabId, shouldEnableSidePanel(next));
   notifySessionUpdated(next);
 
   return next;
@@ -351,7 +346,7 @@ async function getTabSession(tabId) {
   next.sqlLabSidebarHidden = await getSqlLabSidebarHiddenPreference(next?.url);
   await applySiteAccessState(next, next?.url);
 
-  if (!next.siteAccessGranted && !normalizeSql(next.capturedSql)) {
+  if (!next.siteAccessGranted) {
     next.bridgeReady = false;
     next.hasSqlSnapshot = false;
     next.sql = "";
@@ -367,7 +362,9 @@ async function getTabSession(tabId) {
     next.resultRowCount = null;
     next.execution = null;
     next.executionEvents = [];
-    next.analysis = null;
+    if (!normalizeSql(next.capturedSql)) {
+      next.analysis = null;
+    }
     applyAnalysisInputState(next);
   }
 
@@ -379,15 +376,17 @@ async function getTabSessionForSidePanel(tabId) {
     return null;
   }
 
+  await tabUpdates.get(tabId)?.catch(() => {});
   const tab = await chrome.tabs.get(tabId);
   const existing = await getTabSession(tabId);
   const accessGranted = await hasSiteAccessForUrl(tab?.url);
 
   if (!accessGranted) {
     const next = buildTabAccessSession(tab, existing, false);
-    await updateSidePanelForTab(tabId, shouldEnableSidePanel(next));
     return next;
   }
+
+  await ensureTabObserverInjected(tabId);
 
   if (existing) {
     if (existing.isSqlLab) {
@@ -396,7 +395,6 @@ async function getTabSessionForSidePanel(tabId) {
     return existing;
   }
 
-  await ensureTabObserverInjected(tabId);
   const session = await waitForTabSession(tabId, SESSION_WAIT_TIMEOUT_MS);
 
   if (session) {
@@ -423,14 +421,22 @@ async function ensureTabObserverInjected(tabId) {
       return;
     }
 
-    await ensurePageBridgeInjected(tabId);
     await ensureContentObserverInjected(tabId);
+    await ensurePageBridgeInjected(tabId);
   } catch (error) {
     console.debug("Unable to inject content script into tab", error);
   }
 }
 
 async function ensureContentObserverInjected(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "REFRESH_SQL_OBSERVER" });
+    if (response?.ok && response.observer === "superflow-content-v1") {
+      return;
+    }
+  } catch (_error) {
+    // No live receiver after navigation or an extension reload: replace the observer.
+  }
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ["content.js"],
@@ -463,22 +469,6 @@ async function waitForTabSession(tabId, timeoutMs) {
   return getTabSession(tabId);
 }
 
-async function updateSidePanelForTab(tabId, enabled) {
-  try {
-    await chrome.sidePanel.setOptions({
-      tabId,
-      path: PANEL_PATH,
-      enabled,
-    });
-  } catch (error) {
-    console.warn("Failed to update side panel state", error);
-  }
-}
-
-function shouldEnableSidePanel(session) {
-  return Boolean(isSupportedPageUrl(session?.url) || normalizeSql(session?.activeSql));
-}
-
 function isSupportedPageUrl(url) {
   return /^https?:\/\//i.test(String(url || ""));
 }
@@ -490,7 +480,6 @@ async function handleEnableSiteAccess(message) {
     throw new Error("Missing tab id");
   }
 
-  await syncSidePanelForTab(tabId);
   await ensureTabObserverInjected(tabId);
 
   const session = await waitForTabSession(tabId, SESSION_WAIT_TIMEOUT_MS);
@@ -532,10 +521,12 @@ async function handleDisableSiteAccess(message) {
       continue;
     }
 
-    const session = await getTabSession(matchingTab.id);
-    const next = buildTabAccessSession(matchingTab, session, false);
-    await chrome.storage.session.set({ [sessionKey(matchingTab.id)]: next });
-    notifySessionUpdated(next);
+    await queueTabUpdate(matchingTab.id, async () => {
+      const session = await getTabSession(matchingTab.id);
+      const next = buildTabAccessSession(matchingTab, session, false);
+      await chrome.storage.session.set({ [sessionKey(matchingTab.id)]: next });
+      notifySessionUpdated(next);
+    });
   }
 
   const current = await getTabSession(tabId);
@@ -633,7 +624,6 @@ async function handleCaptureSelectionSql(message, sender) {
   );
 
   await chrome.storage.session.set({ [sessionKey(tabId)]: next });
-  await updateSidePanelForTab(tabId, shouldEnableSidePanel(next));
   notifySessionUpdated(next);
 
   return next;
@@ -674,7 +664,6 @@ async function handleClearCapturedSql(message) {
   );
 
   await chrome.storage.session.set({ [sessionKey(tabId)]: next });
-  await updateSidePanelForTab(tabId, shouldEnableSidePanel(next));
   notifySessionUpdated(next);
 
   return next;
@@ -710,45 +699,22 @@ async function handleSetSqlLabSchemaPanelHidden(message) {
 
     await sendSqlLabSidebarHiddenToTab(matchingTab.id, hidden);
 
-    const session = await getTabSession(matchingTab.id);
-
-    if (!session) {
-      continue;
-    }
-
-    const next = {
-      ...session,
-      sqlLabSidebarHidden: hidden,
-      updatedAt: Date.now(),
-    };
-
-    await chrome.storage.session.set({ [sessionKey(matchingTab.id)]: next });
-    notifySessionUpdated(next);
+    await queueTabUpdate(matchingTab.id, async () => {
+      const session = await getTabSession(matchingTab.id);
+      if (!session) {
+        return;
+      }
+      const next = {
+        ...session,
+        sqlLabSidebarHidden: hidden,
+        updatedAt: Date.now(),
+      };
+      await chrome.storage.session.set({ [sessionKey(matchingTab.id)]: next });
+      notifySessionUpdated(next);
+    });
   }
 
   return getTabSession(tabId);
-}
-
-async function syncSidePanelForTab(tabId, providedTab = null) {
-  try {
-    const tab = providedTab || (await chrome.tabs.get(tabId));
-    await updateSidePanelForTab(tabId, isSupportedPageUrl(tab?.url || ""));
-  } catch (error) {
-    console.debug("Unable to sync side panel state", error);
-  }
-}
-
-async function refreshSidePanelAvailability() {
-  try {
-    const tabs = await chrome.tabs.query({});
-    await Promise.all(
-      tabs
-        .filter((tab) => typeof tab.id === "number")
-        .map((tab) => updateSidePanelForTab(tab.id, isSupportedPageUrl(tab.url || ""))),
-    );
-  } catch (error) {
-    console.debug("Unable to refresh side panel availability", error);
-  }
 }
 
 async function clearTabSession(tabId) {
@@ -765,6 +731,30 @@ async function clearTabSession(tabId) {
 
 function sessionKey(tabId) {
   return `${SESSION_PREFIX}${tabId}`;
+}
+
+function isSameDocumentUrl(left, right) {
+  try {
+    const first = new URL(left);
+    const second = new URL(right);
+    first.hash = "";
+    second.hash = "";
+    return first.href === second.href;
+  } catch (_error) {
+    return left === right;
+  }
+}
+
+function queueTabUpdate(tabId, update) {
+  const pending = (tabUpdates.get(tabId) || Promise.resolve()).then(update, update);
+  tabUpdates.set(tabId, pending);
+  const cleanup = () => {
+    if (tabUpdates.get(tabId) === pending) {
+      tabUpdates.delete(tabId);
+    }
+  };
+  void pending.then(cleanup, cleanup);
+  return pending;
 }
 
 function notifySessionUpdated(session) {
@@ -1071,7 +1061,7 @@ function buildTabAccessSession(tab, existingSession = null, grantedOverride = nu
     updatedAt: Date.now(),
   };
 
-  if (!accessGranted && !normalizeSql(next.capturedSql)) {
+  if (!accessGranted) {
     next.bridgeReady = false;
     next.hasSqlSnapshot = false;
     next.sql = "";
@@ -1087,7 +1077,9 @@ function buildTabAccessSession(tab, existingSession = null, grantedOverride = nu
     next.resultRowCount = null;
     next.execution = null;
     next.executionEvents = [];
-    next.analysis = null;
+    if (!normalizeSql(next.capturedSql)) {
+      next.analysis = null;
+    }
   }
 
   applyAnalysisInputState(next);
