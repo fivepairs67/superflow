@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "../../extension/src/sidepanel/App";
 import { analyzeSql } from "../../extension/sql-analysis.js";
 import sampleSql from "../../docs/store/sample.sql";
+import scriptPrefix from "../../docs/store/script-prefix.sql";
 import "../../extension/src/sidepanel/styles/index.css";
 
 // This synthetic Chrome boundary is never imported by the extension build.
@@ -14,7 +15,10 @@ function createEvent() {
   };
 }
 const onMessage = createEvent();
-let sql = sampleSql;
+const initialSql = new URLSearchParams(window.location.search).get("sample") === "script"
+  ? `${scriptPrefix}\n${sampleSql}`
+  : sampleSql;
+let sql = initialSql;
 let dialect = "postgresql";
 function getSession() {
   return {
@@ -39,7 +43,7 @@ Object.defineProperty(window, "chrome", {
       async sendMessage(message: { type: string; sql?: string; dialectPreference?: string }) {
         if (message.type === "GET_TAB_SESSION") return { ok: true, session: getSession() };
         if (message.type === "CAPTURE_SELECTION_SQL") sql = message.sql || "";
-        else if (message.type === "CLEAR_CAPTURED_SQL") sql = sampleSql;
+        else if (message.type === "CLEAR_CAPTURED_SQL") sql = initialSql;
         else if (message.type === "SET_ANALYSIS_DIALECT") dialect = message.dialectPreference || "auto";
         else return { ok: false, error: "Not available in the screenshot preview" };
         const session = getSession();

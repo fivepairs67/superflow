@@ -144,8 +144,7 @@ async function handlePageStatusUpdated(message, sender) {
   }
 
   const currentTab = await chrome.tabs.get(tabId);
-  if ((message.url && !isSameDocumentUrl(message.url, currentTab.url)) ||
-      (sender.url && !isSameDocumentUrl(sender.url, currentTab.url))) {
+  if (!isCurrentPageMessage(message, sender, currentTab)) {
     return getTabSession(tabId);
   }
   const previous = await getTabSession(tabId);
@@ -155,12 +154,13 @@ async function handlePageStatusUpdated(message, sender) {
     ...previous,
     tabId,
     url: resolvedUrl,
-    title: sender.tab?.title ?? message.title ?? previous?.title ?? "",
+    title: message.title ?? currentTab.title ?? previous?.title ?? "",
     isSupersetLike: Boolean(message.isSupersetLike),
     isSqlLab: Boolean(message.isSqlLab),
     signals: Array.isArray(message.signals) ? message.signals : [],
     bridgeReady: Boolean(message.bridgeReady),
     hasSqlSnapshot: Boolean(message.hasSqlSnapshot),
+    pageSnapshotReceived: typeof message.sql === "string" || Boolean(previous?.pageSnapshotReceived),
     sql: typeof message.sql === "string" ? message.sql : previous?.sql ?? "",
     sqlPreview:
       typeof message.sqlPreview === "string" ? message.sqlPreview : previous?.sqlPreview ?? "",
@@ -210,6 +210,16 @@ async function handlePageStatusUpdated(message, sender) {
     updatedAt: Date.now(),
   };
 
+  // Execution belongs to the editor SQL, not just the browser tab. A different
+  // worksheet (including an empty one) must not inherit another query's status.
+  if (normalizeSql(next.sql) !== normalizeSql(previous?.sql)) {
+    next.execution = null;
+    next.executionEvents = [];
+    next.resultRowCount = typeof message.resultRowCount === "number" ? message.resultRowCount : null;
+  } else if (message.resultRowCount === null) {
+    next.resultRowCount = null;
+  }
+
   await applySiteAccessState(next, resolvedUrl);
 
   if (!next.siteAccessGranted) {
@@ -223,7 +233,7 @@ async function handlePageStatusUpdated(message, sender) {
   applyAnalysisInputState(next);
 
   if (typeof next.resultRowCount === "number") {
-    next.execution = mergeExecution(previous?.execution, {
+    next.execution = mergeExecution(next.execution, {
       source: "dom",
       phase: "snapshot",
       kind: "results",
@@ -267,11 +277,12 @@ async function handleNetworkEvent(message, sender) {
   }
 
   const currentTab = await chrome.tabs.get(tabId);
-  if (sender.url && !isSameDocumentUrl(sender.url, currentTab.url)) {
+  if (!isCurrentPageMessage(message, sender, currentTab)) {
     return getTabSession(tabId);
   }
   const previous = await getTabSession(tabId);
   const event = normalizeNetworkEvent(message.event);
+  if (!isCurrentExecutionEvent(previous, event)) return previous;
   const resolvedUrl = currentTab.url ?? previous?.url ?? "";
   const sqlLabSidebarHidden = await getSqlLabSidebarHiddenPreference(resolvedUrl);
   const next = {
@@ -306,7 +317,7 @@ async function handleNetworkEvent(message, sender) {
 
   const sqlFromEvent = normalizeSql(event.request?.sql);
 
-  if (sqlFromEvent) {
+  if (sqlFromEvent && !previous?.pageSnapshotReceived) {
     next.sql = sqlFromEvent;
     next.sqlPreview = createSqlPreview(sqlFromEvent);
     next.sqlSource = previous?.sqlSource || `network:${event.kind}`;
@@ -733,6 +744,33 @@ function sessionKey(tabId) {
   return `${SESSION_PREFIX}${tabId}`;
 }
 
+function isCurrentPageMessage(message, sender, currentTab) {
+  // Sender metadata may retain the initial URL across same-document navigation.
+  const pageUrl = message.url || sender.url;
+  return (!pageUrl || isSameDocumentUrl(pageUrl, currentTab.url)) &&
+    (!sender.url || getOriginFromUrl(sender.url) === getOriginFromUrl(currentTab.url)) &&
+    (typeof sender.frameId !== "number" || sender.frameId === 0);
+}
+
+function isCurrentExecutionEvent(session, event) {
+  const sql = normalizeSql(event.request?.sql);
+  const pageSql = normalizeSql(session?.sql);
+  const execution = session?.execution;
+  const queryId = event.response?.queryId ?? event.request?.queryId;
+  const isExecuteRequest = event.kind === "execute" && event.phase === "request";
+
+  if (session?.pageSnapshotReceived && sql && (!pageSql || !pageSql.includes(sql))) return false;
+  if (event.kind === "execute" && !isExecuteRequest && event.requestId &&
+      execution?.requestId !== event.requestId) return false;
+  if (!sql) {
+    // Polling/result traffic without a SQL payload must identify the current
+    // execution; otherwise another SQL Lab tab can overwrite its badges.
+    return queryId != null && execution?.queryId != null &&
+      String(queryId) === String(execution.queryId);
+  }
+  return true;
+}
+
 function isSameDocumentUrl(left, right) {
   try {
     const first = new URL(left);
@@ -846,6 +884,7 @@ async function buildAnalysis(sql, previousAnalysis, sqlUpdatedAt, dialectPrefere
 function normalizeNetworkEvent(event) {
   return {
     source: event?.source || "unknown",
+    requestId: typeof event?.requestId === "string" ? event.requestId : null,
     phase: event?.phase || "request",
     kind: event?.kind || "unknown",
     url: event?.url || "",
@@ -877,6 +916,7 @@ function normalizeNetworkEvent(event) {
 function mergeExecution(previous, event) {
   const next = {
     status: previous?.status || "idle",
+    requestId: previous?.requestId || null,
     queryId: previous?.queryId || null,
     databaseId: previous?.databaseId || null,
     schema: previous?.schema || null,
@@ -899,6 +939,10 @@ function mergeExecution(previous, event) {
 
   if (event.phase === "request" && event.kind === "execute") {
     next.status = "running";
+    next.requestId = event.requestId;
+    next.queryId = event.request?.queryId ?? null;
+    next.rowCount = null;
+    next.lastHttpStatus = null;
     next.startedAt = event.timestamp;
     next.finishedAt = null;
     next.durationMs = null;
@@ -926,6 +970,8 @@ function mergeExecution(previous, event) {
 
     if (event.response?.errorMessage) {
       next.errorMessage = event.response.errorMessage;
+    } else if (normalizedStatus === "failed" && event.response?.httpStatus >= 400) {
+      next.errorMessage = `HTTP ${event.response.httpStatus}`;
     }
   }
 
@@ -933,6 +979,7 @@ function mergeExecution(previous, event) {
 }
 
 function normalizeExecutionStatus(kind, response) {
+  if (response?.ok === false || response?.httpStatus >= 400) return "failed";
   const raw = String(response?.status || "").toLowerCase();
 
   if (!raw) {

@@ -48,6 +48,34 @@ const clauseText = (sql, ranges, key) => (ranges.get(key)?.ranges || []).map(({ 
 const focusedText = (statement, id) => resolveGraphSelection(statement.graph, id, null).ranges
   .map(({ start, end }) => statement.sql.slice(start, end));
 
+test("store sample exposes six CTEs, nested joins, window columns and revenue lineage", async () => {
+  const sql = await readFile(new URL("../../docs/store/sample.sql", import.meta.url), "utf8");
+  const analysis = analyzeSql(sql, { dialectPreference: "postgresql" });
+  assert.equal(analysis.mode, "ast");
+  assert.deepEqual(analysis.ctes.map((cte) => cte.name), [
+    "base_orders", "customer_value", "visit_ranked", "latest_visit", "refund_totals", "customer_ranking",
+  ]);
+  const graph = buildLogicalDisplayGraph(analysis.graph, false);
+  assert.ok(graph.nodes.some((node) => node.id === "cte:customer_ranking:nested-join"));
+  const revenue = graph.columns.find((column) => column.nodeId === "cte:customer_ranking" && column.name === "net_revenue");
+  assert.deepEqual(revenue.upstream.map((ref) => ref.columnName).sort(), ["gross_revenue", "refund_amount"]);
+  const rank = graph.columns.find((column) => column.nodeId === "cte:customer_ranking" && column.name === "region_rank");
+  assert.equal(rank.role, "window");
+});
+
+test("store script sample links two staging writes to the six-CTE report", async () => {
+  const root = new URL("../../docs/store/", import.meta.url);
+  const prefix = await readFile(new URL("script-prefix.sql", root), "utf8");
+  const query = await readFile(new URL("sample.sql", root), "utf8");
+  const analysis = analyzeSql(`${prefix}\n${query}`, { dialectPreference: "postgresql" });
+  assert.equal(analysis.statements.length, 4);
+  assert.ok(analysis.statements.every((statement) => statement.mode === "ast"));
+  assert.equal(buildStatementDisplayGroups(analysis.statements).length, 3);
+  const dependencies = analysis.scriptDependencies.filter((edge) => edge.targetIndex === 3);
+  assert.deepEqual(dependencies.map((edge) => edge.sourceIndex).sort(), [1, 2]);
+  assert.equal(analysis.statements[3].ctes.length, 6);
+});
+
 for (const dialectPreference of ["auto", "hive", "trino", "postgresql"]) {
   test(`${dialectPreference}: REBUILD grouping shifts internal JOIN focus with its query body`, () => {
     const joins = [
@@ -1083,6 +1111,45 @@ test("messages from a previous navigation cannot repopulate the current tab", as
   assert.equal(data["tab:11"], undefined);
 });
 
+test("Bitbucket SPA file changes publish new SQL even when sender metadata retains the initial URL", async () => {
+  const { send, tab, data, api } = backgroundContext();
+  const initialUrl = sourceUrl("first");
+  tab.url = initialUrl;
+  const { context, listeners, timers } = pageContext(initialUrl);
+  context.fetch = async (url) => new Response(url.includes("second.sql") ? "SELECT 2 AS second_file" : "SELECT 1 AS first_file");
+  context.chrome.runtime.sendMessage = (message) => send(message, {
+    tab: { ...tab }, url: initialUrl, frameId: 0,
+  });
+  vm.runInContext(contentSource, context);
+  await context.sendPageStatus();
+  assert.equal(data["tab:11"].sql, "SELECT 1 AS first_file");
+
+  const handler = listeners.find(([name]) => name === "message")[1];
+  const window = vm.runInContext("window", context);
+  for (const file of ["second", "first"]) {
+    tab.url = sourceUrl(file);
+    context.location = new URL(tab.url);
+    api.tabs.onUpdated.emit(11, { url: tab.url });
+    await tick();
+    handler({ source: window, data: { source: "superset-query-visualizer", type: "LOCATION_CHANGED" } });
+    timers.at(-1)[0]();
+    await tick();
+    assert.equal(data["tab:11"]?.url, tab.url);
+    assert.equal(data["tab:11"]?.sql, file === "second" ? "SELECT 2 AS second_file" : "SELECT 1 AS first_file");
+  }
+});
+
+test("current page URLs do not authorize cross-origin or child-frame status messages", async () => {
+  for (const sender of [
+    { url: "https://other.test/editor", frameId: 0 },
+    { url: "https://example.test/editor", frameId: 2 },
+  ]) {
+    const { send, tab, data } = backgroundContext();
+    await send({ type: "PAGE_STATUS_UPDATED", sql: "SELECT 99", url: tab.url }, { tab, ...sender });
+    assert.equal(data["tab:11"], undefined);
+  }
+});
+
 test("source-line fragment changes preserve analysis and accept the original document sender", async () => {
   const { send, data, tab, api } = backgroundContext();
   const initial = tab.url;
@@ -1364,4 +1431,253 @@ test("heuristic tokens preserve real identifiers and omit comments, literals and
   const columns = analysis.graph.columns.filter((column) => column.nodeId === "cte:grouped");
   assert.deepEqual(columns.map((column) => column.upstream.map((ref) => ref.columnName)),
     [["amount", "value"], ["id"], ["category"], ["odd.name"], ["amount"], []]);
+});
+
+// Cross-editor tab switching regression matrix (fictional SQL only).
+const shortSql = "SELECT 2 AS current_query";
+const longSql = "SELECT id FROM sample_old;\n".repeat(200).trim();
+
+function editorPage(kind, { hiddenLong = false, focus = true } = {}) {
+  const page = pageContext();
+  const { context } = page;
+  const roots = [new context.Element(), new context.Element()];
+  const sqls = [shortSql, longSql];
+  const selector = { ace: ".ace_editor", cm5: ".CodeMirror", cm6: ".cm-content", textarea: "textarea" }[kind];
+  let active = 0;
+  roots.forEach((element, index) => {
+    element.tagName = kind === "textarea" ? "TEXTAREA" : "DIV";
+    element.getBoundingClientRect = () => ({ width: index === active ? 600 : 0, height: index === active ? 300 : 0 });
+    element.contains = (target) => target === element;
+    element.matches = (value) => value.split(/,\s*/).includes(selector);
+    Object.defineProperty(element, "textContent", { get: () => sqls[index] });
+    if (kind === "textarea") Object.defineProperty(element, "value", { get: () => sqls[index] });
+    if (kind === "cm5") element.CodeMirror = { getValue: () => sqls[index] };
+  });
+  context.document.activeElement = focus ? roots[active] : null;
+  context.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+  context.document.querySelectorAll = (value) => value === selector ? (hiddenLong ? roots : [roots[active]]) : [];
+  if (kind === "ace") context.ace = { edit: (element) => ({
+    getValue: () => sqls[roots.indexOf(element)],
+    getSelectionRange: () => ({ start: { row: 0, column: 0 }, end: { row: 0, column: 0 } }),
+    getSelectedText: () => "",
+  }) };
+  vm.runInContext(bridgeSource.replace("  const previousCollector =", `
+    Object.assign(globalThis, { findBestSqlSnapshot });
+    const previousCollector =`), context);
+  vm.runInContext(contentSource, context);
+  return {
+    ...page, roots, sqls,
+    switchTo(index, focused = focus) {
+      active = index;
+      context.document.activeElement = focused ? roots[index] : null;
+    },
+    snapshot: () => context.findBestSqlSnapshot()?.sql ?? "",
+    domSnapshot: () => context.collectDomSqlSnapshot()?.sql ?? "",
+  };
+}
+
+// CodeMirror 6 cases cover visible DOM, not its virtualized off-screen document.
+for (const kind of ["ace", "cm5", "cm6", "textarea"]) {
+  test(`${kind}: same-URL A→B→A with one mounted editor`, () => {
+    const page = editorPage(kind);
+    assert.equal(page.snapshot(), shortSql);
+    page.switchTo(1);
+    assert.equal(page.snapshot(), longSql);
+    page.switchTo(0);
+    assert.equal(page.snapshot(), shortSql);
+  });
+  for (const focus of [true, false]) {
+    test(`${kind}: short active vs long hidden (focused=${focus})`, () => {
+      const page = editorPage(kind, { hiddenLong: true, focus });
+      assert.equal(page.snapshot(), shortSql);
+      assert.equal(page.domSnapshot(), shortSql, "content DOM fallback must also exclude hidden editors");
+    });
+  }
+  test(`${kind}: empty active tab cannot resurrect an old hidden query`, () => {
+    const page = editorPage(kind, { hiddenLong: true });
+    page.sqls[0] = "";
+    assert.equal(page.snapshot(), "");
+    assert.equal(page.domSnapshot(), "");
+  });
+}
+
+test("Monaco: visible model swap A→B→A at the same URL", () => {
+  const page = monacoPage();
+  const initial = page.model.getValue();
+  assert.equal(page.context.findBestSqlSnapshot().sql, initial);
+  page.setSql(shortSql);
+  assert.equal(page.context.findBestSqlSnapshot().sql, shortSql);
+  page.setSql(initial);
+  assert.equal(page.context.findBestSqlSnapshot().sql, initial);
+});
+
+test("Monaco: ignore hidden models even when the current editor loses focus", () => {
+  const { context, model, editor } = monacoPage();
+  const hidden = { getValue: () => longSql, getLanguageId: () => "sql" };
+  context.document.activeElement = null;
+  editor.hasTextFocus = () => false;
+  context.monaco.editor.getModels = () => [hidden, model];
+  context.monaco.editor.getEditors = () => [
+    { getDomNode: () => null, getModel: () => hidden, hasTextFocus: () => false }, editor,
+  ];
+  assert.equal(context.findBestSqlSnapshot().sql, model.getValue());
+});
+
+test("SQL Lab: late execution response cannot replace the active worksheet", async () => {
+  const { send, tab, data } = backgroundContext();
+  const sender = { tab, url: tab.url };
+  await send({ type: "SUPERSET_NETWORK_EVENT", event: {
+    phase: "request", kind: "execute", request: { sql: "SELECT 1 AS query_a", queryId: "a" }, timestamp: 100,
+  } }, sender);
+  await send({ type: "PAGE_STATUS_UPDATED", url: tab.url, sql: shortSql }, sender);
+  await send({ type: "SUPERSET_NETWORK_EVENT", event: {
+    phase: "response", kind: "execute", request: { sql: "SELECT 1 AS query_a", queryId: "a" },
+    response: { status: "success", ok: true, rowCount: 1, queryId: "a" }, timestamp: 200,
+  } }, sender);
+  assert.equal(data["tab:11"].activeSql, shortSql);
+  assert.equal(data["tab:11"].execution, null);
+});
+
+for (const suffix of ["#anchor", "?active=second"]) {
+  test(`unchanged full model survives history navigation ${suffix}`, async () => {
+    const { context, messages, model, root } = monacoPage();
+    root.textContent = "SELECT id FROM sample_events";
+    vm.runInContext(contentSource, context);
+    const window = vm.runInContext("window", context);
+    let cursor = 0;
+    const flush = () => {
+      while (cursor < messages.length) {
+        const data = messages[cursor++];
+        if (data.source || data.target) context.dispatchEvent({ type: "message", source: window, data });
+      }
+    };
+    flush();
+    await context.sendPageStatus();
+    context.history.replaceState({}, "", context.location.href + suffix);
+    flush();
+    await context.sendPageStatus();
+    assert.equal(messages.filter((message) => message.type === "PAGE_STATUS_UPDATED").at(-1).sql, model.getValue());
+  });
+}
+
+test("execution events accept live SPA URLs but reject old pages, foreign origins and child frames", async () => {
+  const { send, tab, data } = backgroundContext();
+  const initial = tab.url;
+  tab.url += "?query=second";
+  const event = { phase: "request", kind: "execute", request: { sql: "SELECT 2" } };
+  await send({ type: "SUPERSET_NETWORK_EVENT", url: tab.url, event }, { tab, url: initial, frameId: 0 });
+  assert.equal(data["tab:11"]?.execution?.status, "running");
+  const before = structuredClone(data["tab:11"]);
+  for (const [url, sender] of [
+    [initial, { tab, url: initial, frameId: 0 }],
+    [tab.url, { tab, url: "https://other.test/editor", frameId: 0 }],
+    [tab.url, { tab, url: initial, frameId: 2 }],
+  ]) {
+    await send({ type: "SUPERSET_NETWORK_EVENT", url, event: { ...event, request: { sql: "SELECT 99" } } }, sender);
+    assert.deepEqual(data["tab:11"], before);
+  }
+});
+
+test("HTTP failures finish the current execution even without a JSON status field", async () => {
+  for (const httpStatus of [400, 401, 500, 503]) {
+    const { send, tab, data } = backgroundContext();
+    const sender = { tab, url: tab.url };
+    await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "request", kind: "execute", request: { sql: "SELECT 1" }, timestamp: 100 } }, sender);
+    await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "response", kind: "execute", request: { sql: "SELECT 1" }, response: { ok: false, httpStatus }, timestamp: 200 } }, sender);
+    assert.equal(data["tab:11"].execution.status, "failed");
+    assert.equal(data["tab:11"].execution.finishedAt, 200);
+    assert.equal(data["tab:11"].execution.durationMs, 100);
+  }
+});
+
+test("selected SQL execution keeps the full worksheet and ignores older executions and unknown polling", async () => {
+  const { send, tab, data } = backgroundContext();
+  const sender = { tab, url: tab.url };
+  const sql = "SELECT 1;\nSELECT 2;";
+  await send({ type: "PAGE_STATUS_UPDATED", url: tab.url, sql, resultRowCount: null }, sender);
+  for (const requestId of ["first", "second"]) {
+    await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "request", kind: "execute", requestId, request: { sql: "SELECT 2;" }, timestamp: 100 } }, sender);
+    assert.equal(data["tab:11"].sql, sql);
+  }
+  await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "response", kind: "execute", requestId: "first", request: { sql: "SELECT 2;" }, response: { ok: true, status: "success", rowCount: 99 } } }, sender);
+  assert.equal(data["tab:11"].execution.status, "running");
+  await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "response", kind: "execute", requestId: "second", request: { sql: "SELECT 2;" }, response: { ok: true, status: "success", queryId: "current", rowCount: 2 } } }, sender);
+  assert.equal(data["tab:11"].execution.rowCount, 2);
+  for (const queryId of [null, "old"]) {
+    await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "response", kind: "results", response: { ok: true, queryId, rowCount: 99 } } }, sender);
+    assert.equal(data["tab:11"].execution.rowCount, 2);
+  }
+  await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "response", kind: "results", response: { ok: true, queryId: "current", rowCount: 3 } } }, sender);
+  assert.equal(data["tab:11"].execution.rowCount, 3);
+  await send({ type: "PAGE_STATUS_UPDATED", url: tab.url, sql: "", resultRowCount: null }, sender);
+  assert.equal(data["tab:11"].execution, null);
+  await send({ type: "SUPERSET_NETWORK_EVENT", event: { phase: "response", kind: "execute", requestId: "second", request: { sql: "SELECT 2;" }, response: { ok: true, status: "success" } } }, sender);
+  assert.equal(data["tab:11"].sql, "");
+  assert.equal(data["tab:11"].execution, null);
+});
+
+test("fetch requests retain their originating page URL and request identity until response", async () => {
+  const { context, messages } = pageContext();
+  const pending = deferred();
+  context.fetch = () => pending.promise;
+  vm.runInContext(bridgeSource, context);
+  const initial = context.location.href;
+  const request = context.fetch("/api/v1/sqllab/execute", { method: "POST", body: '{"sql":"SELECT 1"}' });
+  context.location = new URL(initial + "?query=other");
+  pending.resolve(new Response('{"status":"success"}', { headers: { "content-type": "application/json" } }));
+  await request;
+  const events = messages.filter((message) => message.type === "SUPERSET_NETWORK_EVENT").map((message) => message.payload);
+  assert.equal(events.length, 2);
+  assert.ok(events[0].requestId);
+  assert.equal(events[0].requestId, events[1].requestId);
+  assert.ok(events.every((event) => event.pageUrl === initial));
+});
+
+test("XHR responses retain request identity and the original page URL after navigation", () => {
+  const { context, messages } = pageContext();
+  const handlers = [];
+  context.XMLHttpRequest.prototype.addEventListener = (_name, handler) => handlers.push(handler);
+  vm.runInContext(bridgeSource, context);
+  const initial = context.location.href;
+  const xhr = new context.XMLHttpRequest();
+  xhr.open("POST", "/superset/sql_json/");
+  xhr.send('{"sql":"SELECT 1"}');
+  context.location = new URL(initial + "?next=1");
+  xhr.status = 500;
+  xhr.responseText = '{"message":"Server error"}';
+  handlers[0]();
+  const events = messages.filter((message) => message.type === "SUPERSET_NETWORK_EVENT").map((message) => message.payload);
+  assert.equal(events.length, 2);
+  assert.ok(events[0].requestId);
+  assert.equal(events[0].requestId, events[1].requestId);
+  assert.ok(events.every((event) => event.pageUrl === initial));
+  assert.equal(events[1].response.ok, false);
+});
+
+test("content relays the request page URL rather than relabeling a late response as the new page", async () => {
+  const { context, messages } = pageContext();
+  vm.runInContext(contentSource, context);
+  const initial = context.location.href;
+  context.location = new URL(initial + "?next=1");
+  context.dispatchEvent({ type: "message", source: vm.runInContext("window", context), data: {
+    source: "superset-query-visualizer", type: "SUPERSET_NETWORK_EVENT",
+    payload: { pageUrl: initial, phase: "response", kind: "execute" },
+  } });
+  await tick();
+  assert.equal(messages.find((message) => message.type === "SUPERSET_NETWORK_EVENT").url, initial);
+});
+
+test("Monaco empty editor cannot fall back to a hidden viewport", () => {
+  const { context, root, setSql } = monacoPage();
+  setSql("");
+  root.textContent = "";
+  const hidden = new context.Element();
+  hidden.tagName = "DIV";
+  hidden.textContent = longSql;
+  hidden.matches = () => false;
+  hidden.getBoundingClientRect = () => ({ width: 0, height: 0 });
+  context.document.querySelectorAll = (selector) => selector === ".monaco-editor .view-lines" ? [hidden] : [];
+  assert.equal(context.findBestSqlSnapshot(), null);
+  vm.runInContext(contentSource, context);
+  assert.equal(context.collectDomSqlSnapshot(), null);
 });

@@ -187,6 +187,7 @@ export interface AnalysisResult {
 }
 
 export interface ExecutionState {
+  requestId?: string | null;
   status?: string;
   queryId?: string | number | null;
   durationMs?: number | null;
@@ -221,6 +222,7 @@ export interface TabSession {
   signals?: string[];
   bridgeReady?: boolean;
   hasSqlSnapshot?: boolean;
+  pageSnapshotReceived?: boolean;
   sql?: string;
   sqlPreview?: string;
   sqlSource?: string;

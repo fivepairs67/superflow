@@ -169,6 +169,19 @@
   padding-inline: 0;
 }
 
+.graph-tool-button--zoom-step {
+  color: #0e4e89;
+}
+
+.graph-zoom-step-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  stroke: currentColor;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
 .graph-zoom-indicator {
   display: inline-flex;
   align-items: flex-end;

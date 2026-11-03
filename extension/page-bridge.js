@@ -577,11 +577,12 @@
     }
 
     for (const editorRoot of queryAllBySelector(".ace_editor")) {
+      if (!isElementVisible(editorRoot)) continue;
       try {
         const editor = window.ace.edit(editorRoot);
         const sql = normalizeSql(editor?.getValue?.());
 
-        if (!sql || !isElementVisible(editorRoot)) {
+        if (!sql) {
           continue;
         }
 
@@ -818,6 +819,7 @@
 
     if (window.ace?.edit) {
       for (const editorRoot of queryAllBySelector(".ace_editor")) {
+        if (!isElementVisible(editorRoot)) continue;
         try {
           const editor = window.ace.edit(editorRoot);
           const sql = normalizeSql(editor?.getValue?.());
@@ -843,6 +845,7 @@
     }
 
     for (const editorRoot of queryAllBySelector(".ace_editor")) {
+      if (!isElementVisible(editorRoot)) continue;
       const lines = Array.from(editorRoot.querySelectorAll(".ace_line"))
         .map((line) => normalizeSql(line.textContent || ""))
         .filter(Boolean);
@@ -912,6 +915,7 @@
     const candidates = [...collectAceSnapshots(), ...collectMonacoSnapshots()];
 
     for (const element of queryAllBySelectors(DOM_SQL_SNAPSHOT_SELECTORS)) {
+      if (!isElementVisible(element)) continue;
       const value =
         typeof element.value === "string"
           ? element.value
@@ -1009,6 +1013,7 @@
     }
 
     return containers
+      .filter(isElementVisible)
       .map((container) => {
         const sql = normalizeSql(extractStructuredCodeText(container));
 
@@ -1156,10 +1161,10 @@
     return "bridge:structured-code";
   }
 
-  function emitSqlSnapshotIfChanged() {
+  function emitSqlSnapshotIfChanged(force = false) {
     const current = window.__SQV_SQL_COLLECTOR__;
     if (current && current.emit !== emitSqlSnapshotIfChanged) {
-      current.emit();
+      current.emit(force);
       return;
     }
     const snapshot = findBestSqlSnapshot();
@@ -1167,12 +1172,21 @@
       ? `${snapshot.source}:${snapshot.sql}:${snapshot.selectedText || ""}:${snapshot.selectionStart ?? ""}:${snapshot.selectionEnd ?? ""}`
       : "";
 
-    if (signature === lastSqlSignature) {
+    if (!force && signature === lastSqlSignature) {
       return;
     }
 
     lastSqlSignature = signature;
     post("SQL_SNAPSHOT", snapshot);
+  }
+
+  if (!window.__SQV_SNAPSHOT_REQUEST_READY__) {
+    window.__SQV_SNAPSHOT_REQUEST_READY__ = true;
+    window.addEventListener("message", (event) => {
+      if (event.source !== window || event.data?.target !== `${SOURCE}:page-bridge` ||
+          event.data.type !== "REQUEST_SQL_SNAPSHOT") return;
+      window.__SQV_SQL_COLLECTOR__?.emit(true);
+    });
   }
 
   const previousCollector = window.__SQV_SQL_COLLECTOR__;
@@ -1213,6 +1227,8 @@
 
   window.__SQV_BRIDGE_READY__ = true;
 
+  let networkRequestSequence = 0;
+  const nextRequestId = () => `${Date.now()}:${++networkRequestSequence}`;
   const rawFetch = window.fetch;
   window.fetch = async function sqvFetch(input, init) {
     const url = resolveUrl(input);
@@ -1220,10 +1236,14 @@
     const isTracked = isSupersetRequest(url);
     const kind = classifyRequest(url);
     const requestSummary = summarizeRequestBody(init?.body);
+    const pageUrl = window.location.href;
+    const requestId = nextRequestId();
 
     if (isTracked) {
       emitNetworkEvent({
         source: "fetch",
+        pageUrl,
+        requestId,
         phase: "request",
         kind,
         url,
@@ -1240,6 +1260,8 @@
         const responseSummary = await summarizeResponse(response.clone());
         emitNetworkEvent({
           source: "fetch",
+          pageUrl,
+          requestId,
           phase: "response",
           kind,
           url,
@@ -1255,6 +1277,8 @@
       if (isTracked) {
         emitNetworkEvent({
           source: "fetch",
+          pageUrl,
+          requestId,
           phase: "error",
           kind,
           url,
@@ -1288,10 +1312,14 @@
     const isTracked = isSupersetRequest(meta.url);
     const kind = classifyRequest(meta.url);
     const requestSummary = summarizeRequestBody(body);
+    const pageUrl = window.location.href;
+    const requestId = nextRequestId();
 
     if (isTracked) {
       emitNetworkEvent({
         source: "xhr",
+        pageUrl,
+        requestId,
         phase: "request",
         kind,
         url: meta.url,
@@ -1328,6 +1356,8 @@
 
           emitNetworkEvent({
             source: "xhr",
+            pageUrl,
+            requestId,
             phase: "response",
             kind,
             url: meta.url,

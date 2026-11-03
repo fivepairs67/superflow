@@ -66,9 +66,9 @@ export function GraphToolbar({
       </ToolbarGroup>
 
       <ToolbarGroup label="Zoom" variant="zoom">
-        <ToolButton label="-" title="Zoom out" onClick={onZoomOut} />
+        <ZoomStepButton direction="out" onClick={onZoomOut} />
         <ZoomIndicatorButton zoom={zoom} zoomLevel={zoomLevel} onClick={onResetView} />
-        <ToolButton label="+" title="Zoom in" onClick={onZoomIn} />
+        <ZoomStepButton direction="in" onClick={onZoomIn} />
         <ToolButton label="Fit" title="Fit to panel" onClick={onFit} />
       </ToolbarGroup>
 
@@ -162,6 +162,23 @@ interface ToolButtonProps {
   label: string;
   title: string;
   onClick: () => void;
+}
+
+function ZoomStepButton({ direction, onClick }: { direction: "in" | "out"; onClick: () => void }) {
+  const label = direction === "in" ? "Zoom in" : "Zoom out";
+  return (
+    <button
+      type="button"
+      className="graph-tool-button graph-tool-button--zoom-step"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+    >
+      <svg className="graph-zoom-step-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+        <path d={direction === "in" ? "M3 10h14M10 3v14" : "M3 10h14"} />
+      </svg>
+    </button>
+  );
 }
 
 function ToolButton({ label, title, onClick }: ToolButtonProps) {

@@ -122,6 +122,7 @@ function handlePageMessage(event) {
     lastUrl = window.location.href;
     bridgeSnapshot = null;
     resetSnapshotStateForLocation();
+    requestBridgeSnapshot();
     scheduleStatusSync();
   }
 
@@ -133,6 +134,7 @@ function handlePageMessage(event) {
   if (event.data.type === "SUPERSET_NETWORK_EVENT") {
     void relayNetworkEvent({
       type: "SUPERSET_NETWORK_EVENT",
+      url: event.data.payload?.pageUrl || window.location.href,
       event: event.data.payload,
     });
     scheduleStatusSync();
@@ -251,10 +253,15 @@ function observeNavigation() {
     lastUrl = window.location.href;
     bridgeSnapshot = null;
     resetSnapshotStateForLocation();
+    requestBridgeSnapshot();
     scheduleStatusSync();
   }, URL_POLL_MS);
 
   document.addEventListener("visibilitychange", handleVisibilityChange);
+}
+
+function requestBridgeSnapshot() {
+  window.postMessage({ target: `${PAGE_SOURCE}:page-bridge`, type: "REQUEST_SQL_SNAPSHOT" }, "*");
 }
 
 function handleVisibilityChange() {
@@ -1210,6 +1217,7 @@ function collectDomSqlSnapshot() {
       }
 
       seen.add(element);
+      if (!isElementVisible(element)) continue;
       const sql = normalizeSql(extractElementText(element));
 
       if (!sql) {
@@ -1253,6 +1261,7 @@ function collectStructuredCodeSnapshots() {
   }
 
   return containers
+    .filter(isElementVisible)
     .map((container) => {
       const sql = normalizeSql(extractStructuredCodeText(container));
 
